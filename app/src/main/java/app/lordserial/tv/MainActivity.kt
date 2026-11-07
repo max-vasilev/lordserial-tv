@@ -3,7 +3,6 @@ package app.lordserial.tv
 import android.annotation.SuppressLint
 import android.graphics.Color
 import android.os.Bundle
-import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
@@ -11,7 +10,6 @@ import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -48,9 +46,11 @@ import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import androidx.tv.material3.darkColorScheme
-import kotlinx.coroutines.delay
 
-private const val PLAYER_BASE_URL = "https://api.namy.ws/embed/movie/354"
+private const val PLAYER_HOST = "api.namy.ws"
+private const val MOVIE_ID = 354
+private const val PLAYER_BASE_URL = "https://$PLAYER_HOST/embed/movie/$MOVIE_ID"
+private const val LAST_EPISODE_KEY = "vp$MOVIE_ID"
 private val EPISODE_COUNTS = listOf(8, 9, 8, 9, 8)
 private val BACKGROUND = ComposeColor(0xFF090B12)
 private val SURFACE = ComposeColor(0xFF1C1F2B)
@@ -61,13 +61,219 @@ private const val PREFS = "progress"
 private const val KEY_SEASON = "last_season"
 private const val KEY_EPISODE = "last_episode"
 
-private enum class PageState { LOADING, READY, ERROR }
+// The site's player has a TV layout but expects the browser to move focus between its buttons,
+// which Android WebView does not do. This script adds only that: the arrows move a focus ring to
+// the nearest visible control, OK clicks it, and the first press while the controls are hidden
+// just shows them. On the progress bar Left/Right seek and OK plays or pauses. Nothing else on
+// the page is changed.
+private val REMOTE_NAVIGATION_JS = """
+    (function () {
+      if (window.__lordSerialRemote) return;
+      window.__lordSerialRemote = true;
+      var style = document.createElement('style');
+      style.textContent = '.lordserial-focus{outline:3px solid #fff!important;outline-offset:3px!important;' +
+        'box-shadow:0 0 0 7px rgba(0,0,0,.45)!important}';
+      (document.head || document.documentElement).appendChild(style);
+
+      var current = null, lastRect = null, beforeSlider = null;
+      var SEMANTIC = 'button,a[href],[role="button"],[role="menuitem"],[role="option"],input:not([type="hidden"]),select';
+      // The progress bar itself ignores pointer events and its parts inherit the pointer cursor,
+      // so it is matched by its class name instead.
+      var TIMELINE = /(^|\s)timeline_/;
+
+      function shown(el, anyPointer) {
+        var r = el.getBoundingClientRect();
+        if (r.width < 4 || r.height < 4) return false;
+        if (r.right <= 0 || r.bottom <= 0 || r.left >= innerWidth || r.top >= innerHeight) return false;
+        for (var n = el; n && n.nodeType === 1; n = n.parentElement) {
+          var cs = getComputedStyle(n);
+          if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) < 0.1) return false;
+        }
+        if (!anyPointer && getComputedStyle(el).pointerEvents === 'none') return false;
+        var x = Math.min(innerWidth - 1, Math.max(0, r.left + r.width / 2));
+        var y = Math.min(innerHeight - 1, Math.max(0, r.top + r.height / 2));
+        var top = document.elementFromPoint(x, y);
+        return !!top && (top === el || el.contains(top));
+      }
+
+      function clickable(el) {
+        if (el.matches(SEMANTIC)) return true;
+        if (getComputedStyle(el).cursor !== 'pointer') return false;
+        var p = el.parentElement;
+        return !p || getComputedStyle(p).cursor !== 'pointer';
+      }
+
+      function isSlider(el) { return TIMELINE.test(String(el.className)); }
+
+      function candidates() {
+        var area = innerWidth * innerHeight, found = [];
+        var all = document.body ? document.body.getElementsByTagName('*') : [];
+        for (var i = 0; i < all.length; i++) {
+          var el = all[i];
+          if (el.tagName === 'VIDEO' || el.tagName === 'IFRAME') continue;
+          var slider = isSlider(el);
+          if (!slider && !clickable(el)) continue;
+          var r = el.getBoundingClientRect();
+          if (r.width * r.height > area * 0.4) continue;
+          if (shown(el, slider)) found.push(el);
+        }
+        return found.filter(function (el) {
+          return !found.some(function (other) { return other !== el && other.contains(el); });
+        });
+      }
+
+      function center(r) { return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; }
+
+      function nearest(list, rect) {
+        var c = center(rect), best = null, bestD = Infinity;
+        list.forEach(function (el) {
+          var p = center(el.getBoundingClientRect()), d = Math.hypot(p.x - c.x, p.y - c.y);
+          if (d < bestD) { bestD = d; best = el; }
+        });
+        return best;
+      }
+
+      // With no earlier focus, start on Play/Pause: the leftmost button of the bottom bar that is
+      // not a previous/next episode button.
+      function playButton(list) {
+        var buttons = list.filter(function (el) {
+          return el.tagName === 'BUTTON' && el.getBoundingClientRect().top > innerHeight / 2 &&
+            !/(^|\s)episode-/.test(String(el.className));
+        });
+        buttons.sort(function (a, b) { return a.getBoundingClientRect().left - b.getBoundingClientRect().left; });
+        return buttons[0] || list[0] || null;
+      }
+
+      function pick(from, dir, list) {
+        var a = from.getBoundingClientRect(), ca = center(a), best = null, bestScore = Infinity;
+        list.forEach(function (el) {
+          if (el === from) return;
+          var b = el.getBoundingClientRect(), cb = center(b), gap, ortho, overlap;
+          if (dir === 'left' || dir === 'right') {
+            // The progress bar spans the whole width; it is reached with Up/Down only.
+            if (isSlider(el)) return;
+            if (dir === 'right' ? cb.x <= ca.x + 2 : cb.x >= ca.x - 2) return;
+            gap = dir === 'right' ? b.left - a.right : a.left - b.right;
+            overlap = b.top < a.bottom && b.bottom > a.top;
+            ortho = overlap ? 0 : Math.abs(cb.y - ca.y);
+          } else {
+            if (dir === 'down' ? cb.y <= ca.y + 2 : cb.y >= ca.y - 2) return;
+            gap = dir === 'down' ? b.top - a.bottom : a.top - b.bottom;
+            overlap = b.left < a.right && b.right > a.left;
+            ortho = overlap ? 0 : Math.abs(cb.x - ca.x);
+          }
+          var score = Math.max(0, gap) + ortho * 3 + Math.hypot(cb.x - ca.x, cb.y - ca.y) * 0.1;
+          if (score < bestScore) { bestScore = score; best = el; }
+        });
+        return best;
+      }
+
+      function setCurrent(el) {
+        if (current) current.classList.remove('lordserial-focus');
+        current = el;
+        if (!el) return;
+        el.classList.add('lordserial-focus');
+        lastRect = el.getBoundingClientRect();
+        try { el.focus({ preventScroll: true }); } catch (e) {}
+      }
+
+      function wake() {
+        var x = innerWidth / 2 + (Math.random() * 6 - 3), y = innerHeight / 2;
+        var target = document.elementFromPoint(x, y) || document.body;
+        target.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: x, clientY: y }));
+      }
+
+      function layout(list) {
+        return list.map(function (el) {
+          var r = el.getBoundingClientRect();
+          return Math.round(r.left) + ',' + Math.round(r.top);
+        }).join(';');
+      }
+
+      // Controls slide and fade in, so wait until they are visible and have stopped moving.
+      function whenSettled(done) {
+        var tries = 0, previous = null;
+        (function check() {
+          var list = candidates(), now = layout(list);
+          if ((!list.length || now !== previous) && tries++ < 20) {
+            previous = now;
+            setTimeout(check, 100);
+            return;
+          }
+          done(list);
+        })();
+      }
+
+      function togglePlay() {
+        var v = document.querySelector('video');
+        if (v) { if (v.paused) v.play(); else v.pause(); }
+      }
+
+      // Called by the app on Back: closes an open season, episode or voice list first.
+      window.__lordSerialBack = function () {
+        var open = document.querySelector('[class*="opened_"]');
+        if (!open || !shown(open, true)) return false;
+        var head = open.querySelector('[class*="head_"]') || open;
+        head.click();
+        whenSettled(function (list) {
+          setCurrent(list.indexOf(head) >= 0 ? head : (list.length ? nearest(list, lastRect) : null));
+        });
+        return true;
+      };
+
+      var DIRS = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
+      window.addEventListener('keydown', function (e) {
+        var dir = DIRS[e.key], ok = e.key === 'Enter' || e.keyCode === 13;
+        if (e.key === 'MediaPlayPause') {
+          togglePlay();
+          e.preventDefault();
+          return;
+        }
+        if (!dir && !ok) return;
+        e.preventDefault();
+        e.stopPropagation();
+        var list = candidates(), hidden = !current || list.indexOf(current) < 0;
+        wake();
+        if (hidden) {
+          var previous = current;
+          whenSettled(function (again) {
+            if (previous && again.indexOf(previous) >= 0) setCurrent(previous);
+            else setCurrent(previous && lastRect && again.length ? nearest(again, lastRect) : playButton(again));
+          });
+          return;
+        }
+        if (isSlider(current)) {
+          if (ok) { togglePlay(); return; }
+          if (dir === 'left' || dir === 'right') {
+            var video = document.querySelector('video');
+            if (video && isFinite(video.duration)) {
+              video.currentTime = Math.max(0, Math.min(video.duration - 1, video.currentTime + (dir === 'left' ? -10 : 10)));
+            }
+            return;
+          }
+        }
+        if (ok) {
+          var clicked = current;
+          clicked.click();
+          whenSettled(function (again) {
+            if (again.indexOf(clicked) >= 0) setCurrent(clicked);
+            else if (again.length) setCurrent(nearest(again, lastRect));
+          });
+          return;
+        }
+        var next = isSlider(current) && beforeSlider && list.indexOf(beforeSlider) >= 0 &&
+          (dir === 'up' ? center(beforeSlider.getBoundingClientRect()).y < lastRect.top
+                        : center(beforeSlider.getBoundingClientRect()).y > lastRect.bottom)
+          ? beforeSlider : pick(current, dir, list);
+        if (next && isSlider(next)) beforeSlider = current;
+        if (next) setCurrent(next);
+      }, true);
+    })();
+""".trimIndent()
 
 class MainActivity : ComponentActivity() {
     private var webView: WebView? = null
-    private var pageState by mutableStateOf(PageState.LOADING)
-    private var pageError by mutableStateOf("")
-    private var isFullscreen by mutableStateOf(false)
+    private var loadError by mutableStateOf<String?>(null)
     private var playerContainer: FrameLayout? = null
     private var fullscreenView: View? = null
     private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
@@ -82,7 +288,6 @@ class MainActivity : ComponentActivity() {
             var selectedSeason by remember { mutableIntStateOf(progress.getInt(KEY_SEASON, 1)) }
             var selectedEpisode by remember { mutableIntStateOf(0) }
             var lastWatched by remember { mutableStateOf(readLastWatched()) }
-            var controlsVisible by remember { mutableStateOf(true) }
             val episodeUrl = if (selectedEpisode == 0) null else
                 "$PLAYER_BASE_URL?episode=$selectedEpisode&season=$selectedSeason"
 
@@ -94,42 +299,30 @@ class MainActivity : ComponentActivity() {
                     .putInt(KEY_SEASON, season)
                     .putInt(KEY_EPISODE, episode)
                     .apply()
-                controlsVisible = true
-            }
-
-            fun closeEpisode() {
-                val season = selectedSeason
-                val episode = selectedEpisode
-                readCurrentPosition { seconds ->
-                    if (seconds != null && episode != 0) {
-                        progress.edit().putLong(progressKey(season, episode), seconds).apply()
-                    }
-                    closePlayer()
-                    selectedEpisode = 0
-                }
             }
 
             BackHandler(enabled = selectedEpisode != 0) {
-                if (fullscreenView != null) hideCustomView() else closeEpisode()
-            }
-
-            // Poll only the top-level HTML5 video. If the provider nests its player in a
-            // cross-origin iframe, the browser security model intentionally prevents access.
-            LaunchedEffect(selectedSeason, selectedEpisode) {
-                if (selectedEpisode != 0) {
-                    delay(30_000)
-                    if (pageState == PageState.LOADING) {
-                        pageError = "Плеер не ответил за 30 секунд. Проверь сеть и VPN."
-                        pageState = PageState.ERROR
-                    }
-                }
-            }
-
-            LaunchedEffect(selectedSeason, selectedEpisode) {
-                if (selectedEpisode != 0) {
-                    while (true) {
-                        saveCurrentPosition(selectedSeason, selectedEpisode)
-                        delay(5_000)
+                val player = webView
+                when {
+                    fullscreenView != null -> hideCustomView()
+                    player == null -> selectedEpisode = 0
+                    // An open season, episode or voice list in the player closes first. Otherwise
+                    // read the episode the player is on, which may have changed inside the player.
+                    else -> player.evaluateJavascript(
+                        "(function(){if(window.__lordSerialBack&&window.__lordSerialBack())return 'list';" +
+                            "try{return localStorage.getItem('$LAST_EPISODE_KEY')||''}catch(e){return ''}})()"
+                    ) { result ->
+                        val value = result?.trim('"').orEmpty()
+                        if (value != "list") {
+                            val parts = value.split(":").mapNotNull { it.toIntOrNull() }
+                            if (parts.size == 2 && parts[0] in 1..EPISODE_COUNTS.size &&
+                                parts[1] in 1..EPISODE_COUNTS[parts[0] - 1]
+                            ) {
+                                openEpisode(parts[0], parts[1])
+                            }
+                            closePlayer()
+                            selectedEpisode = 0
+                        }
                     }
                 }
             }
@@ -150,7 +343,6 @@ class MainActivity : ComponentActivity() {
                         AndroidView(
                             modifier = Modifier.fillMaxSize(),
                             factory = { context ->
-                                pageState = PageState.LOADING
                                 FrameLayout(context).apply {
                                     setBackgroundColor(Color.BLACK)
                                     playerContainer = this
@@ -163,51 +355,32 @@ class MainActivity : ComponentActivity() {
                                             FrameLayout.LayoutParams.MATCH_PARENT
                                         )
                                     )
+                                    loadError = null
+                                    // The player reopens the episode it saved last (localStorage
+                                    // "vp<id>" = "season:episode") and ignores the one in the URL,
+                                    // so a page on its origin stores the chosen one, then opens it.
                                     player.loadDataWithBaseURL(
-                                        "https://api.namy.ws/",
-                                        playerShellHtml(episodeUrl),
+                                        "https://$PLAYER_HOST/",
+                                        "<script>try{localStorage.setItem('$LAST_EPISODE_KEY'," +
+                                            "'$selectedSeason:$selectedEpisode')}catch(e){}" +
+                                            "location.replace('$episodeUrl')</script>",
                                         "text/html",
                                         "UTF-8",
                                         null
                                     )
+                                    player.requestFocus()
                                 }
                             },
                             onRelease = {
-                                saveCurrentPosition(selectedSeason, selectedEpisode)
                                 closePlayer()
                                 playerContainer = null
                             }
                         )
-
-                        if (controlsVisible && !isFullscreen) {
-                            PlayerOverlay(
-                                season = selectedSeason,
-                                episode = selectedEpisode,
-                                state = pageState,
-                                error = pageError,
-                                onPlayPause = { runPlayerCommand("toggle", selectedSeason, selectedEpisode) },
-                                onSeekBack = { runPlayerCommand("seek-back", selectedSeason, selectedEpisode) },
-                                onSeekForward = { runPlayerCommand("seek-forward", selectedSeason, selectedEpisode) },
-                                onBack = { closeEpisode() },
-                                onRetry = { webView?.reload() },
-                                onHide = { controlsVisible = false }
-                            )
-                        } else {
-                            // The player remains the only visible content. Back always returns
-                            // to the native episode selector.
-                            val controlsFocus = remember { FocusRequester() }
-                            LaunchedEffect(selectedEpisode, controlsVisible) {
-                                runCatching { controlsFocus.requestFocus() }
-                            }
-                            Box(
-                                modifier = Modifier.fillMaxSize(),
-                                contentAlignment = Alignment.BottomEnd
-                            ) {
-                                Button(
-                                    onClick = { controlsVisible = true },
-                                    modifier = Modifier.padding(28.dp).focusRequester(controlsFocus),
-                                    colors = chipColors()
-                                ) { Text("Управление", fontSize = 16.sp) }
+                        loadError?.let { error ->
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("Не удалось открыть плеер", fontSize = 22.sp, color = ComposeColor.White)
+                                Text(error, fontSize = 15.sp, color = MUTED)
+                                Text("Назад — к сериям", fontSize = 15.sp, color = MUTED)
                             }
                         }
                     } else {
@@ -223,166 +396,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-    }
-
-    private fun progressKey(season: Int, episode: Int) = "position_${season}_${episode}"
-
-    private fun readCurrentPosition(onRead: (Long?) -> Unit) {
-        val currentWebView = webView
-        if (currentWebView == null) {
-            onRead(null)
-            return
-        }
-        currentWebView.evaluateJavascript(
-            """
-            (function(){
-              function findVideo(w, depth) {
-                if (depth > 4) return null;
-                try {
-                  var v = w.document.querySelector('video');
-                  if (v) return v;
-                  var frames = w.document.querySelectorAll('iframe');
-                  for (var i = 0; i < frames.length; i++) {
-                    try {
-                      var found = findVideo(frames[i].contentWindow, depth + 1);
-                      if (found) return found;
-                    } catch (e) {}
-                  }
-                } catch (e) {}
-                return null;
-              }
-              var v = findVideo(window, 0);
-              return v ? Math.floor(v.currentTime || 0) : null;
-            })()
-            """.trimIndent()
-        ) { raw ->
-            onRead(raw?.trim()?.trim('"')?.toLongOrNull())
-        }
-    }
-
-    private fun saveCurrentPosition(season: Int, episode: Int) {
-        if (episode == 0) return
-        readCurrentPosition { seconds ->
-            if (seconds != null) {
-                progress.edit().putLong(progressKey(season, episode), seconds).apply()
-            }
-        }
-    }
-
-    private fun findVideoJs(): String = """
-        function findVideo(w, depth) {
-          if (depth > 4) return null;
-          try {
-            var v = w.document.querySelector('video');
-            if (v) {
-              if (!w.document.getElementById('lordserial-tv-player-style')) {
-                var style = w.document.createElement('style');
-                style.id = 'lordserial-tv-player-style';
-                style.textContent =
-                  'html,body{margin:0!important;padding:0!important;width:100%!important;height:100%!important;overflow:hidden!important;background:#000!important}' +
-                  'body *{visibility:hidden!important}' +
-                  'video{visibility:visible!important;position:fixed!important;inset:0!important;width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;object-fit:contain!important;background:#000!important}' +
-                  'video::-webkit-media-controls{display:none!important}';
-                (w.document.head || w.document.documentElement).appendChild(style);
-              }
-              return v;
-            }
-            var frames = w.document.querySelectorAll('iframe');
-            for (var i = 0; i < frames.length; i++) {
-              try {
-                var found = findVideo(frames[i].contentWindow, depth + 1);
-                if (found) return found;
-              } catch (e) {}
-            }
-          } catch (e) {}
-          return null;
-        }
-    """.trimIndent()
-
-    private fun runPlayerCommand(command: String, season: Int, episode: Int) {
-        val saved = progress.getLong(progressKey(season, episode), 0L)
-        val js = when (command) {
-            "toggle" -> """
-                (function(){
-                  ${findVideoJs()}
-                  var v = findVideo(window, 0);
-                  if (v) { if (v.paused) v.play(); else v.pause(); return 'video'; }
-                  var f = document.querySelector('iframe');
-                  if (f) { try { f.contentWindow.focus(); } catch(e) {} }
-                  return 'player-frame';
-                })()
-            """.trimIndent()
-            "play" -> """
-                (function(){ ${findVideoJs()} var v=findVideo(window,0); if(v) v.play().catch(function(){}); })()
-            """.trimIndent()
-            "pause" -> """
-                (function(){ ${findVideoJs()} var v=findVideo(window,0); if(v) v.pause(); })()
-            """.trimIndent()
-            "seek-back" -> """
-                (function(){ ${findVideoJs()} var v=findVideo(window,0); if(v) v.currentTime=Math.max(0,v.currentTime-10); })()
-            """.trimIndent()
-            "seek-forward" -> """
-                (function(){ ${findVideoJs()} var v=findVideo(window,0); if(v) v.currentTime=Math.min(v.duration||1e9,v.currentTime+10); })()
-            """.trimIndent()
-            "resume" -> """
-                (function(){
-                  ${findVideoJs()}
-                  var saved = $saved;
-                  var attempts = 0;
-                  function restore() {
-                    var v = findVideo(window, 0);
-                    if (v && v.readyState >= 1) {
-                      if (saved > 0 && Math.abs(v.currentTime - saved) > 3) v.currentTime = saved;
-                      v.play().catch(function(){});
-                      return;
-                    }
-                    if (attempts++ < 40) setTimeout(restore, 500);
-                  }
-                  restore();
-                })()
-            """.trimIndent()
-            else -> ""
-        }
-        webView?.evaluateJavascript(js) { raw ->
-            val fallbackKey = when {
-                command == "toggle" && raw?.contains("player-frame") == true -> KeyEvent.KEYCODE_SPACE
-                command == "seek-back" && (raw == null || raw == "null") -> KeyEvent.KEYCODE_DPAD_LEFT
-                command == "seek-forward" && (raw == null || raw == "null") -> KeyEvent.KEYCODE_DPAD_RIGHT
-                else -> null
-            }
-            if (fallbackKey != null) dispatchPlayerKey(fallbackKey)
-        }
-    }
-
-    private fun dispatchPlayerKey(keyCode: Int) {
-        val target = webView ?: return
-        target.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
-        target.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
-    }
-
-    private fun playerShellHtml(embedUrl: String): String {
-        val safeUrl = embedUrl.replace("&", "&amp;").replace("\"", "&quot;")
-        return """
-            <!doctype html>
-            <html>
-              <head>
-                <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-                <meta charset="utf-8">
-                <style>
-                  * { box-sizing: border-box; }
-                  html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#000; }
-                  iframe { position:fixed; inset:0; width:100%; height:100%; border:0; background:#000; }
-                </style>
-              </head>
-              <body>
-                <iframe id="player" src="$safeUrl"
-                  onload="console.log('LORDSERIAL_PLAYER_FRAME_READY')"
-                  onerror="console.log('LORDSERIAL_PLAYER_FRAME_ERROR')"
-                  allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
-                  allowfullscreen></iframe>
-              </body>
-            </html>
-        """.trimIndent()
     }
 
     private fun readLastWatched(): Pair<Int, Int>? {
@@ -498,74 +511,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    @Composable
-    private fun PlayerOverlay(
-        season: Int,
-        episode: Int,
-        state: PageState,
-        error: String,
-        onPlayPause: () -> Unit,
-        onSeekBack: () -> Unit,
-        onSeekForward: () -> Unit,
-        onBack: () -> Unit,
-        onRetry: () -> Unit,
-        onHide: () -> Unit
-    ) {
-        val firstControlFocus = remember { FocusRequester() }
-        LaunchedEffect(Unit) { runCatching { firstControlFocus.requestFocus() } }
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
-            Column(
-                modifier = Modifier.fillMaxWidth().background(ComposeColor(0xDD090B12)).padding(
-                    horizontal = 42.dp, vertical = 22.dp
-                ),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column {
-                        Text(
-                            "ОЧЕНЬ СТРАННЫЕ ДЕЛА",
-                            fontSize = 19.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = ComposeColor.White
-                        )
-                        Text("Сезон $season · Серия $episode", fontSize = 15.sp, color = MUTED)
-                    }
-                    when (state) {
-                        PageState.LOADING -> Text("Подключаем плеер…", color = MUTED)
-                        PageState.READY -> Text("Player 1", color = ComposeColor(0xFFB8E6C2))
-                        PageState.ERROR -> Text("Ошибка загрузки", color = ComposeColor(0xFFFF7777))
-                    }
-                }
-                if (state == PageState.ERROR) {
-                    Text(error.ifBlank { "Проверь подключение и VPN" }, color = MUTED, fontSize = 14.sp)
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                    if (state == PageState.ERROR) {
-                        Button(
-                            onClick = onRetry,
-                            modifier = Modifier.focusRequester(firstControlFocus),
-                            colors = chipColors()
-                        ) { Text("Повторить") }
-                    } else {
-                        Button(onClick = onSeekBack, colors = chipColors()) { Text("−10 сек") }
-                        Button(
-                            onClick = onPlayPause,
-                            modifier = Modifier.focusRequester(firstControlFocus),
-                            colors = chipColors()
-                        ) { Text("Пауза / Play") }
-                        Button(onClick = onSeekForward, colors = chipColors()) { Text("+10 сек") }
-                    }
-                    Button(onClick = onHide, colors = chipColors()) { Text("Скрыть панель") }
-                    Button(onClick = onBack, colors = chipColors()) { Text("К сериям") }
-                }
-            }
-        }
-    }
-
     @SuppressLint("SetJavaScriptEnabled")
     private fun createPlayerWebView(): WebView = WebView(this).apply {
         setBackgroundColor(Color.BLACK)
@@ -574,7 +519,6 @@ class MainActivity : ComponentActivity() {
         settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
-            databaseEnabled = true
             mediaPlaybackRequiresUserGesture = false
             cacheMode = WebSettings.LOAD_DEFAULT
             mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
@@ -582,62 +526,42 @@ class MainActivity : ComponentActivity() {
             allowContentAccess = false
             javaScriptCanOpenWindowsAutomatically = false
             setSupportMultipleWindows(false)
+            // The player picks its layout from the user agent: with "Mobile" in it, it shows the
+            // touch layout, whose controls only appear on a tap. Without it, this TV's model name
+            // ("MiTV") selects the player's own TV layout, the one the site shows on a TV.
+            userAgentString = WebSettings.getDefaultUserAgent(context).replace(" Mobile", "")
         }
         val cookieManager = CookieManager.getInstance()
         cookieManager.setAcceptCookie(true)
         cookieManager.setAcceptThirdPartyCookies(this, true)
         webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                val scheme = request.url.scheme?.lowercase()
-                return scheme != "http" && scheme != "https"
+                val url = request.url
+                val scheme = url.scheme?.lowercase()
+                if (scheme != "https" && scheme != "http") return true
+                // Ads in the player may try to take over the page; keep it on the player.
+                return request.isForMainFrame && url.host != PLAYER_HOST
             }
 
             override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
                 super.onPageStarted(view, url, favicon)
-                pageError = ""
-                pageState = PageState.LOADING
+                loadError = null
             }
 
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                 super.onReceivedError(view, request, error)
                 if (request.isForMainFrame) {
-                    pageError = error.description?.toString().orEmpty()
-                    pageState = PageState.ERROR
-                }
-            }
-
-            override fun onReceivedHttpError(
-                view: WebView,
-                request: WebResourceRequest,
-                errorResponse: WebResourceResponse
-            ) {
-                super.onReceivedHttpError(view, request, errorResponse)
-                if (request.isForMainFrame && errorResponse.statusCode >= 400) {
-                    pageError = "HTTP ${errorResponse.statusCode}"
-                    pageState = PageState.ERROR
+                    loadError = error.description?.toString().orEmpty()
                 }
             }
 
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
-                // The shell finishes after its Player 1 iframe, so READY may already be set
-                // here; onPageStarted has put the state back to LOADING for this load.
+                view.evaluateJavascript(REMOTE_NAVIGATION_JS, null)
                 view.requestFocus()
-                runPlayerCommand("resume", this@MainActivity.progress.getInt(KEY_SEASON, 1), this@MainActivity.progress.getInt(KEY_EPISODE, 1))
             }
         }
         webChromeClient = object : WebChromeClient() {
-            override fun onConsoleMessage(message: android.webkit.ConsoleMessage): Boolean {
-                when (message.message()) {
-                    "LORDSERIAL_PLAYER_FRAME_READY" -> pageState = PageState.READY
-                    "LORDSERIAL_PLAYER_FRAME_ERROR" -> {
-                        pageError = "Не удалось загрузить Player 1."
-                        pageState = PageState.ERROR
-                    }
-                }
-                return true
-            }
-
             override fun onShowCustomView(view: View, callback: CustomViewCallback) {
                 if (fullscreenView != null) {
                     callback.onCustomViewHidden()
@@ -654,25 +578,13 @@ class MainActivity : ComponentActivity() {
                     )
                 )
                 view.bringToFront()
-                isFullscreen = true
+                view.requestFocus()
                 applyImmersiveMode()
             }
 
             override fun onHideCustomView() {
                 hideCustomView()
             }
-        }
-        setOnKeyListener { _, keyCode, event ->
-            if (event.action == KeyEvent.ACTION_DOWN &&
-                (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || keyCode == KeyEvent.KEYCODE_SPACE)
-            ) {
-                runPlayerCommand(
-                    "toggle",
-                    this@MainActivity.progress.getInt(KEY_SEASON, 1),
-                    this@MainActivity.progress.getInt(KEY_EPISODE, 1)
-                )
-                true
-            } else false
         }
     }
 
@@ -683,7 +595,7 @@ class MainActivity : ComponentActivity() {
         fullscreenView = null
         fullscreenCallback?.onCustomViewHidden()
         fullscreenCallback = null
-        isFullscreen = false
+        webView?.requestFocus()
         applyImmersiveMode()
     }
 
@@ -696,7 +608,7 @@ class MainActivity : ComponentActivity() {
             destroy()
         }
         webView = null
-        pageState = PageState.LOADING
+        loadError = null
     }
 
     private fun applyImmersiveMode() {
@@ -709,38 +621,6 @@ class MainActivity : ComponentActivity() {
                 or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                 or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
             )
-    }
-
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (event.action == KeyEvent.ACTION_DOWN &&
-            webView != null && this@MainActivity.progress.getInt(KEY_EPISODE, 0) != 0
-        ) {
-            val season = this@MainActivity.progress.getInt(KEY_SEASON, 1)
-            val episode = this@MainActivity.progress.getInt(KEY_EPISODE, 1)
-            when (event.keyCode) {
-                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
-                    runPlayerCommand("toggle", season, episode)
-                    return true
-                }
-                KeyEvent.KEYCODE_MEDIA_PLAY -> {
-                    runPlayerCommand("play", season, episode)
-                    return true
-                }
-                KeyEvent.KEYCODE_MEDIA_PAUSE -> {
-                    runPlayerCommand("pause", season, episode)
-                    return true
-                }
-                KeyEvent.KEYCODE_MEDIA_REWIND -> {
-                    runPlayerCommand("seek-back", season, episode)
-                    return true
-                }
-                KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                    runPlayerCommand("seek-forward", season, episode)
-                    return true
-                }
-            }
-        }
-        return super.dispatchKeyEvent(event)
     }
 
     override fun onResume() {

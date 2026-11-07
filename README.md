@@ -2,7 +2,7 @@
 
 Personal Android TV player for «Очень странные дела».
 
-The app uses a native Compose for TV interface for season/episode selection and playback controls. The LordSerial website itself is not displayed. Player 1 is loaded inside a minimal full-screen playback shell.
+The app uses a native Compose for TV interface for season/episode selection. Playback shows Player 1 exactly as the site does, full screen, operated with the remote instead of a cursor. The LordSerial website page itself is not displayed.
 
 ## Target device
 - Xiaomi Mi TV 4A (MiTV-MOOQ1)
@@ -13,8 +13,9 @@ The app uses a native Compose for TV interface for season/episode selection and 
 - Player 1 embed only; Players 2 and 3 are intentionally excluded.
 - Existing system VPN/network settings are used unchanged.
 - Playback runs in Android WebView because the provider's direct media stream and player-control protocol have not yet been verified for Media3.
-- Native play/pause and ±10-second controls work when the embedded player exposes a same-origin HTML5 video element. Remote media keys are also forwarded to the player.
-- Per-episode resume is saved when the embedded video element is accessible. Cross-origin provider frames may limit native controls and progress recovery.
+- The Player 1 embed page is loaded directly and left unchanged. The WebView user agent drops "Mobile", so the player picks its own TV layout instead of the touch layout.
+- Remote control: the arrows move a focus ring between the player's own controls, OK presses the focused one, and the first press while the controls are hidden shows them. On the progress bar Left/Right seek 10 seconds and OK plays or pauses. Back closes an open season/episode/voice list first, then returns to the episode screen.
+- The player keeps its own playback position per episode; the app remembers the last opened episode for Continue Watching.
 - Embedded fullscreen requests are handled by the app.
 
 ## Build
