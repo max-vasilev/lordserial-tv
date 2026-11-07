@@ -602,7 +602,7 @@ class MainActivity : ComponentActivity() {
                 pageState = PageState.LOADING
                 // Wait for the embedded Player 1 frame, not just the local shell.
                 view.requestFocus()
-                runPlayerCommand("resume", progress.getInt(KEY_SEASON, 1), progress.getInt(KEY_EPISODE, 1))
+                runPlayerCommand("resume", this@MainActivity.progress.getInt(KEY_SEASON, 1), this@MainActivity.progress.getInt(KEY_EPISODE, 1))
             }
         }
         webChromeClient = object : WebChromeClient() {
@@ -643,8 +643,8 @@ class MainActivity : ComponentActivity() {
             ) {
                 runPlayerCommand(
                     "toggle",
-                    progress.getInt(KEY_SEASON, 1),
-                    progress.getInt(KEY_EPISODE, 1)
+                    this@MainActivity.progress.getInt(KEY_SEASON, 1),
+                    this@MainActivity.progress.getInt(KEY_EPISODE, 1)
                 )
                 true
             } else false
@@ -688,10 +688,10 @@ class MainActivity : ComponentActivity() {
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN &&
-            webView != null && progress.getInt(KEY_EPISODE, 0) != 0
+            webView != null && this@MainActivity.progress.getInt(KEY_EPISODE, 0) != 0
         ) {
-            val season = progress.getInt(KEY_SEASON, 1)
-            val episode = progress.getInt(KEY_EPISODE, 1)
+            val season = this@MainActivity.progress.getInt(KEY_SEASON, 1)
+            val episode = this@MainActivity.progress.getInt(KEY_EPISODE, 1)
             when (event.keyCode) {
                 KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
                     runPlayerCommand("toggle", season, episode)
