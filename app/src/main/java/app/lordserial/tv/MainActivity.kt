@@ -5,7 +5,6 @@ import android.graphics.Color
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.View
-import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.webkit.CookieManager
@@ -730,6 +729,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        hideCustomView()
         webView?.apply {
             stopLoading()
             destroy()
