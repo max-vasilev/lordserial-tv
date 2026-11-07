@@ -313,7 +313,21 @@ class MainActivity : ComponentActivity() {
             """.trimIndent()
             else -> ""
         }
-        webView?.evaluateJavascript(js, null)
+        webView?.evaluateJavascript(js) { raw ->
+            val fallbackKey = when {
+                command == "toggle" && raw?.contains("player-frame") == true -> KeyEvent.KEYCODE_SPACE
+                command == "seek-back" && (raw == null || raw == "null") -> KeyEvent.KEYCODE_DPAD_LEFT
+                command == "seek-forward" && (raw == null || raw == "null") -> KeyEvent.KEYCODE_DPAD_RIGHT
+                else -> null
+            }
+            if (fallbackKey != null) dispatchPlayerKey(fallbackKey)
+        }
+    }
+
+    private fun dispatchPlayerKey(keyCode: Int) {
+        val target = webView ?: return
+        target.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+        target.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
     }
 
     private fun playerShellHtml(embedUrl: String): String {
