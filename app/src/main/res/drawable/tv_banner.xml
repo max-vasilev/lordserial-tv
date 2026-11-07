@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<bitmap xmlns:android="http://schemas.android.com/apk/res/android"
-    android:src="@drawable/ic_launcher"
-    android:gravity="center"
-    android:tileMode="disabled" />
+<!-- TV banner, 320x180dp. A vector of its own: a <bitmap> cannot wrap the vector ic_launcher,
+     so the launcher failed to load the old banner and fell back to the small icon. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp" android:height="180dp" android:viewportWidth="320" android:viewportHeight="180">
+    <path android:fillColor="#10131E" android:pathData="M0,0h320v180h-320z" />
+    <path android:fillColor="#D83B3B" android:pathData="M110,36h100v108h-100z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M124,58h12v64h-12zM144,58h12v64h-12zM164,58h12v64h-12zM184,58h12v64h-12z" />
+</vector>

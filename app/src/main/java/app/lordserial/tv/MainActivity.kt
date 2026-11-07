@@ -1,14 +1,18 @@
 package app.lordserial.tv
 
 import android.annotation.SuppressLint
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Bundle
 import android.os.Build
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -32,26 +36,42 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color as ComposeColor
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.tv.material3.Button
+import androidx.tv.material3.ButtonColors
+import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import androidx.tv.material3.darkColorScheme
 
 private const val SERIES_URL = "https://ochen-strannye-dela-lordserial.club/"
 private val EPISODE_COUNTS = listOf(8, 9, 8, 9, 8)
 private val BACKGROUND = ComposeColor(0xFF090B12)
+private val SURFACE = ComposeColor(0xFF1C1F2B)
 private val MUTED = ComposeColor(0xFFB8BBC7)
 private val ACCENT = ComposeColor(0xFFB52A36)
+
+private const val PREFS = "progress"
+private const val KEY_SEASON = "last_season"
+private const val KEY_EPISODE = "last_episode"
+private const val KEY_WATCHED = "watched"
+
+private enum class PageState { LOADING, READY, ERROR }
 
 class MainActivity : ComponentActivity() {
     private var webView: WebView? = null
     private var customView: View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
     private var isFullscreen = false
+    private var pageState by mutableStateOf(PageState.LOADING)
+    private var pageError by mutableStateOf("")
+    private val progress by lazy { getSharedPreferences(PREFS, MODE_PRIVATE) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -59,23 +79,49 @@ class MainActivity : ComponentActivity() {
         applyImmersiveMode()
 
         setContent {
-            var selectedSeason by remember { mutableIntStateOf(1) }
+            var selectedSeason by remember { mutableIntStateOf(progress.getInt(KEY_SEASON, 1)) }
             var selectedEpisode by remember { mutableIntStateOf(0) }
+            var lastWatched by remember { mutableStateOf(readLastWatched()) }
+            var watched by remember {
+                mutableStateOf(progress.getStringSet(KEY_WATCHED, null)?.toSet() ?: emptySet())
+            }
             val episodeUrl = if (selectedEpisode == 0) null else
                 "${SERIES_URL}season-$selectedSeason/episode-$selectedEpisode"
 
+            fun openEpisode(season: Int, episode: Int) {
+                selectedSeason = season
+                selectedEpisode = episode
+                lastWatched = season to episode
+                watched = watched + "$season:$episode"
+                progress.edit()
+                    .putInt(KEY_SEASON, season)
+                    .putInt(KEY_EPISODE, episode)
+                    .putStringSet(KEY_WATCHED, watched)
+                    .apply()
+            }
+
+            fun closeEpisode() {
+                closePlayer()
+                selectedEpisode = 0
+            }
+
             BackHandler(enabled = selectedEpisode != 0) {
                 val view = webView
-                if (isFullscreen) {
-                    exitFullscreen()
-                } else if (view?.canGoBack() == true) {
-                    view.goBack()
-                } else {
-                    selectedEpisode = 0
+                when {
+                    isFullscreen -> exitFullscreen()
+                    pageState == PageState.READY && view?.canGoBack() == true -> view.goBack()
+                    else -> closeEpisode()
                 }
             }
 
-            MaterialTheme {
+            MaterialTheme(
+                colorScheme = darkColorScheme(
+                    primary = ACCENT,
+                    background = BACKGROUND,
+                    surface = BACKGROUND,
+                    onSurface = ComposeColor.White
+                )
+            ) {
                 Box(
                     modifier = Modifier.fillMaxSize().background(BACKGROUND),
                     contentAlignment = Alignment.Center
@@ -83,20 +129,33 @@ class MainActivity : ComponentActivity() {
                     if (episodeUrl != null) {
                         AndroidView(
                             modifier = Modifier.fillMaxSize(),
-                            factory = { context ->
-                                (webView ?: createWebView().also { webView = it }).apply {
-                                    if (url != episodeUrl) loadUrl(episodeUrl)
+                            factory = {
+                                pageState = PageState.LOADING
+                                createWebView().also {
+                                    webView = it
+                                    it.loadUrl(episodeUrl)
                                 }
                             },
-                            update = { view ->
-                                if (view.url != episodeUrl) view.loadUrl(episodeUrl)
-                            }
+                            // A WebView per episode: leaving the episode releases it, so its audio
+                            // stops and Back never walks into the previous episode's history.
+                            onRelease = { it.destroy() }
                         )
+                        when (pageState) {
+                            PageState.LOADING -> LoadingOverlay(selectedSeason, selectedEpisode)
+                            PageState.ERROR -> ErrorOverlay(
+                                detail = pageError,
+                                onRetry = { webView?.loadUrl(episodeUrl) },
+                                onClose = { closeEpisode() }
+                            )
+                            PageState.READY -> Unit
+                        }
                     } else {
                         SeriesHome(
                             selectedSeason = selectedSeason,
+                            lastWatched = lastWatched,
+                            watched = watched,
                             onSeasonSelected = { selectedSeason = it },
-                            onEpisodeSelected = { selectedEpisode = it }
+                            onEpisodeSelected = { season, episode -> openEpisode(season, episode) }
                         )
                     }
                 }
@@ -104,12 +163,36 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun readLastWatched(): Pair<Int, Int>? {
+        val season = progress.getInt(KEY_SEASON, 0)
+        val episode = progress.getInt(KEY_EPISODE, 0)
+        return if (season in 1..EPISODE_COUNTS.size && episode in 1..EPISODE_COUNTS[season - 1])
+            season to episode else null
+    }
+
+    @Composable
+    private fun chipColors(selected: Boolean = false): ButtonColors = ButtonDefaults.colors(
+        containerColor = if (selected) ACCENT else SURFACE,
+        contentColor = ComposeColor.White,
+        focusedContainerColor = ComposeColor.White,
+        focusedContentColor = BACKGROUND,
+        pressedContainerColor = MUTED,
+        pressedContentColor = BACKGROUND
+    )
+
     @Composable
     private fun SeriesHome(
         selectedSeason: Int,
+        lastWatched: Pair<Int, Int>?,
+        watched: Set<String>,
         onSeasonSelected: (Int) -> Unit,
-        onEpisodeSelected: (Int) -> Unit
+        onEpisodeSelected: (Int, Int) -> Unit
     ) {
+        val continueFocus = remember { FocusRequester() }
+        if (lastWatched != null) {
+            LaunchedEffect(Unit) { runCatching { continueFocus.requestFocus() } }
+        }
+
         Column(
             modifier = Modifier.fillMaxSize().padding(horizontal = 64.dp, vertical = 38.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp)
@@ -120,11 +203,26 @@ class MainActivity : ComponentActivity() {
                 fontWeight = FontWeight.Bold,
                 color = ComposeColor.White
             )
-            Text(
-                text = "Выбери сезон и серию",
-                fontSize = 18.sp,
-                color = MUTED
-            )
+            if (lastWatched != null) {
+                val (season, episode) = lastWatched
+                Button(
+                    onClick = { onEpisodeSelected(season, episode) },
+                    modifier = Modifier.focusRequester(continueFocus),
+                    colors = chipColors()
+                ) {
+                    Text(
+                        text = "▶  Продолжить · Сезон $season, серия $episode",
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            } else {
+                Text(
+                    text = "Выбери сезон и серию",
+                    fontSize = 18.sp,
+                    color = MUTED
+                )
+            }
 
             Spacer(modifier = Modifier.height(4.dp))
             Text(
@@ -137,10 +235,11 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                (1..5).forEach { season ->
+                for (season in 1..EPISODE_COUNTS.size) {
                     Button(
                         onClick = { onSeasonSelected(season) },
-                        modifier = Modifier.width(112.dp)
+                        modifier = Modifier.width(112.dp),
+                        colors = chipColors(selected = season == selectedSeason)
                     ) {
                         Text(
                             text = "Сезон $season",
@@ -166,13 +265,63 @@ class MainActivity : ComponentActivity() {
             ) {
                 items((1..EPISODE_COUNTS[selectedSeason - 1]).toList()) { episode ->
                     Button(
-                        onClick = { onEpisodeSelected(episode) },
-                        modifier = Modifier.fillMaxWidth()
+                        onClick = { onEpisodeSelected(selectedSeason, episode) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = chipColors()
                     ) {
                         Text(
-                            text = "Серия $episode",
+                            text = if ("$selectedSeason:$episode" in watched) "Серия $episode  ✓" else "Серия $episode",
                             fontSize = 17.sp
                         )
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun LoadingOverlay(season: Int, episode: Int) {
+        Box(
+            modifier = Modifier.fillMaxSize().background(BACKGROUND),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(text = "Загрузка…", fontSize = 28.sp, color = ComposeColor.White)
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(text = "Сезон $season, серия $episode", fontSize = 18.sp, color = MUTED)
+            }
+        }
+    }
+
+    @Composable
+    private fun ErrorOverlay(detail: String, onRetry: () -> Unit, onClose: () -> Unit) {
+        val retryFocus = remember { FocusRequester() }
+        LaunchedEffect(Unit) { runCatching { retryFocus.requestFocus() } }
+        Box(
+            modifier = Modifier.fillMaxSize().background(BACKGROUND),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    text = "Не удалось открыть серию",
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = ComposeColor.White
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(text = "Проверь интернет и VPN", fontSize = 18.sp, color = MUTED)
+                if (detail.isNotBlank()) {
+                    Text(text = detail, fontSize = 14.sp, color = MUTED)
+                }
+                Spacer(modifier = Modifier.height(24.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Button(
+                        onClick = onRetry,
+                        modifier = Modifier.focusRequester(retryFocus),
+                        colors = chipColors()
+                    ) { Text(text = "Повторить", fontSize = 17.sp) }
+                    Button(onClick = onClose, colors = chipColors()) {
+                        Text(text = "К списку серий", fontSize = 17.sp)
                     }
                 }
             }
@@ -206,10 +355,41 @@ class MainActivity : ComponentActivity() {
                 return scheme != "http" && scheme != "https"
             }
 
+            override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                pageError = ""
+                pageState = PageState.LOADING
+            }
+
+            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                super.onReceivedError(view, request, error)
+                if (request.isForMainFrame) {
+                    pageError = error.description?.toString().orEmpty()
+                    pageState = PageState.ERROR
+                }
+            }
+
+            override fun onReceivedHttpError(
+                view: WebView,
+                request: WebResourceRequest,
+                errorResponse: WebResourceResponse
+            ) {
+                super.onReceivedHttpError(view, request, errorResponse)
+                if (request.isForMainFrame && errorResponse.statusCode >= 400) {
+                    pageError = "HTTP ${errorResponse.statusCode}"
+                    pageState = PageState.ERROR
+                }
+            }
+
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
+                if (pageState == PageState.LOADING) {
+                    pageState = PageState.READY
+                    view.requestFocus()
+                }
                 // Player 1 is the only option verified to work on the target TV.
-                // Select it automatically when an episode page finishes loading.
+                // Select it when an episode page finishes loading, unless the site already did:
+                // clicking the active player reloads its iframe for nothing.
                 if (url.contains("/season-") && url.contains("/episode-")) {
                     view.evaluateJavascript(
                         """
@@ -224,7 +404,7 @@ class MainActivity : ComponentActivity() {
                           });
                           if (player1) {
                             window.__lordSerialPlayer1Selected = true;
-                            player1.click();
+                            if (!player1.classList.contains('active')) player1.click();
                           }
                         })();
                         """.trimIndent(),
@@ -242,11 +422,11 @@ class MainActivity : ComponentActivity() {
                 customView = view
                 customViewCallback = callback
                 isFullscreen = true
-                (window.decorView as android.view.ViewGroup).addView(
+                (window.decorView as ViewGroup).addView(
                     view,
-                    android.view.ViewGroup.LayoutParams(
-                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                        android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                    ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
                     )
                 )
                 applyImmersiveMode()
@@ -256,9 +436,22 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Stops the episode's WebView at once; the AndroidView destroys it when it leaves the screen. */
+    private fun closePlayer() {
+        exitFullscreen()
+        webView?.apply {
+            stopLoading()
+            onPause()
+            loadUrl("about:blank")
+            webChromeClient = null
+        }
+        webView = null
+        pageState = PageState.LOADING
+    }
+
     private fun exitFullscreen() {
         val view = customView ?: return
-        (window.decorView as android.view.ViewGroup).removeView(view)
+        (window.decorView as ViewGroup).removeView(view)
         customView = null
         customViewCallback?.onCustomViewHidden()
         customViewCallback = null
@@ -289,12 +482,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        // The WebView itself is destroyed by the AndroidView's onRelease.
         exitFullscreen()
-        webView?.apply {
-            stopLoading()
-            webChromeClient = null
-            destroy()
-        }
         webView = null
         super.onDestroy()
     }
