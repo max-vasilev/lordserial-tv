@@ -120,10 +120,9 @@ class MainActivity : ComponentActivity() {
             safeBrowsingEnabled = true
             userAgentString = userAgentString
         }
-        CookieManager.getInstance().apply {
-            setAcceptCookie(true)
-            setAcceptThirdPartyCookies(this@createWebView, true)
-        }
+        val cookies = CookieManager.getInstance()
+        cookies.setAcceptCookie(true)
+        cookies.setAcceptThirdPartyCookies(this, true)
         webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val scheme = request.url.scheme?.lowercase()
