@@ -205,6 +205,33 @@ class MainActivity : ComponentActivity() {
                 val scheme = request.url.scheme?.lowercase()
                 return scheme != "http" && scheme != "https"
             }
+
+            override fun onPageFinished(view: WebView, url: String) {
+                super.onPageFinished(view, url)
+                // Player 1 is the only option verified to work on the target TV.
+                // Select it automatically when an episode page finishes loading.
+                if (url.contains("/season-") && url.contains("/episode-")) {
+                    view.evaluateJavascript(
+                        """
+                        (function() {
+                          if (window.__lordSerialPlayer1Selected) return;
+                          var controls = Array.from(document.querySelectorAll(
+                            'button, a, [role="button"], [onclick]'
+                          ));
+                          var player1 = controls.find(function(el) {
+                            return (el.innerText || el.textContent || '')
+                              .replace(/\\s+/g, ' ').trim().toLowerCase() === 'плеер 1';
+                          });
+                          if (player1) {
+                            window.__lordSerialPlayer1Selected = true;
+                            player1.click();
+                          }
+                        })();
+                        """.trimIndent(),
+                        null
+                    )
+                }
+            }
         }
         webChromeClient = object : WebChromeClient() {
             override fun onShowCustomView(view: View, callback: CustomViewCallback) {
