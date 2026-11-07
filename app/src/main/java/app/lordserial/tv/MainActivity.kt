@@ -396,8 +396,13 @@ class MainActivity : ComponentActivity() {
         onEpisodeSelected: (Int, Int) -> Unit
     ) {
         val continueFocus = remember { FocusRequester() }
-        if (lastWatched != null) {
-            LaunchedEffect(Unit) { runCatching { continueFocus.requestFocus() } }
+        val firstSeasonFocus = remember { FocusRequester() }
+        LaunchedEffect(lastWatched) {
+            if (lastWatched != null) {
+                runCatching { continueFocus.requestFocus() }
+            } else {
+                runCatching { firstSeasonFocus.requestFocus() }
+            }
         }
 
         Column(
@@ -436,7 +441,9 @@ class MainActivity : ComponentActivity() {
                 for (season in 1..EPISODE_COUNTS.size) {
                     Button(
                         onClick = { onSeasonSelected(season) },
-                        modifier = Modifier.width(112.dp),
+                        modifier = Modifier.width(112.dp).then(
+                            if (season == 1) Modifier.focusRequester(firstSeasonFocus) else Modifier
+                        ),
                         colors = chipColors(selected = season == selectedSeason)
                     ) {
                         Text(
