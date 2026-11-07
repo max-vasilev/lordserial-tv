@@ -226,12 +226,12 @@ class MainActivity : ComponentActivity() {
                 return null;
               }
               var v = findVideo(window, 0);
-              return v ? Math.floor(v.currentTime || 0) : 0;
+              return v ? Math.floor(v.currentTime || 0) : null;
             })()
             """.trimIndent()
         ) { raw ->
-            val seconds = raw?.trim()?.trim('"')?.toLongOrNull() ?: 0L
-            if (seconds > 0L) progress.edit().putLong(key, seconds).apply()
+            val seconds = raw?.trim()?.trim('"')?.toLongOrNull()
+            if (seconds != null) progress.edit().putLong(key, seconds).apply()
         }
     }
 
@@ -638,7 +638,7 @@ class MainActivity : ComponentActivity() {
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN &&
-            progress.getInt(KEY_EPISODE, 0) != 0
+            webView != null && progress.getInt(KEY_EPISODE, 0) != 0
         ) {
             val season = progress.getInt(KEY_SEASON, 1)
             val episode = progress.getInt(KEY_EPISODE, 1)
