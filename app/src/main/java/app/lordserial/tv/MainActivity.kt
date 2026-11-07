@@ -19,13 +19,21 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color as ComposeColor
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -34,6 +42,10 @@ import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 
 private const val SERIES_URL = "https://ochen-strannye-dela-lordserial.club/"
+private val EPISODE_COUNTS = listOf(8, 9, 8, 9, 8)
+private val BACKGROUND = ComposeColor(0xFF090B12)
+private val MUTED = ComposeColor(0xFFB8BBC7)
+private val ACCENT = ComposeColor(0xFFB52A36)
 
 class MainActivity : ComponentActivity() {
     private var webView: WebView? = null
@@ -47,57 +59,120 @@ class MainActivity : ComponentActivity() {
         applyImmersiveMode()
 
         setContent {
-            var showWeb by remember { mutableStateOf(false) }
+            var selectedSeason by remember { mutableIntStateOf(1) }
+            var selectedEpisode by remember { mutableIntStateOf(0) }
+            val episodeUrl = if (selectedEpisode == 0) null else
+                "${SERIES_URL}season-$selectedSeason/episode-$selectedEpisode"
 
-            BackHandler(enabled = showWeb) {
+            BackHandler(enabled = selectedEpisode != 0) {
                 val view = webView
                 if (isFullscreen) {
                     exitFullscreen()
                 } else if (view?.canGoBack() == true) {
                     view.goBack()
                 } else {
-                    showWeb = false
+                    selectedEpisode = 0
                 }
             }
 
             MaterialTheme {
                 Box(
-                    modifier = Modifier.fillMaxSize().background(ComposeColor(0xFF090B12)),
+                    modifier = Modifier.fillMaxSize().background(BACKGROUND),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (showWeb) {
+                    if (episodeUrl != null) {
                         AndroidView(
                             modifier = Modifier.fillMaxSize(),
                             factory = { context ->
                                 (webView ?: createWebView().also { webView = it }).apply {
-                                    if (url.isNullOrBlank()) loadUrl(SERIES_URL)
+                                    if (url != episodeUrl) loadUrl(episodeUrl)
                                 }
                             },
-                            update = { }
+                            update = { view ->
+                                if (view.url != episodeUrl) view.loadUrl(episodeUrl)
+                            }
                         )
                     } else {
-                        Column(
-                            modifier = Modifier.padding(48.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(24.dp)
-                        ) {
-                            Text(
-                                text = "ОЧЕНЬ СТРАННЫЕ ДЕЛА",
-                                fontSize = 34.sp,
-                                color = ComposeColor.White
-                            )
-                            Text(
-                                text = "Личная версия LordSerial TV",
-                                fontSize = 18.sp,
-                                color = ComposeColor(0xFFB8BBC7)
-                            )
-                            Button(
-                                onClick = { showWeb = true },
-                                modifier = Modifier.width(260.dp)
-                            ) {
-                                Text("Открыть сериал")
-                            }
-                        }
+                        SeriesHome(
+                            selectedSeason = selectedSeason,
+                            onSeasonSelected = { selectedSeason = it },
+                            onEpisodeSelected = { selectedEpisode = it }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun SeriesHome(
+        selectedSeason: Int,
+        onSeasonSelected: (Int) -> Unit,
+        onEpisodeSelected: (Int) -> Unit
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 64.dp, vertical = 38.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp)
+        ) {
+            Text(
+                text = "ОЧЕНЬ СТРАННЫЕ ДЕЛА",
+                fontSize = 34.sp,
+                fontWeight = FontWeight.Bold,
+                color = ComposeColor.White
+            )
+            Text(
+                text = "Выбери сезон и серию",
+                fontSize = 18.sp,
+                color = MUTED
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "СЕЗОНЫ",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = ACCENT
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                (1..5).forEach { season ->
+                    Button(
+                        onClick = { onSeasonSelected(season) },
+                        modifier = Modifier.width(112.dp)
+                    ) {
+                        Text(
+                            text = "Сезон $season",
+                            fontSize = 15.sp,
+                            fontWeight = if (season == selectedSeason) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "СЕРИИ · СЕЗОН $selectedSeason",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = ACCENT
+            )
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(4),
+                modifier = Modifier.fillMaxSize(),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                items((1..EPISODE_COUNTS[selectedSeason - 1]).toList()) { episode ->
+                    Button(
+                        onClick = { onEpisodeSelected(episode) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "Серия $episode",
+                            fontSize = 17.sp
+                        )
                     }
                 }
             }
@@ -153,7 +228,6 @@ class MainActivity : ComponentActivity() {
             override fun onHideCustomView() = exitFullscreen()
         }
     }
-
 
     private fun exitFullscreen() {
         val view = customView ?: return
