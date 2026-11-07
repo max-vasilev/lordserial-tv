@@ -59,7 +59,6 @@ private val ACCENT = ComposeColor(0xFFB52A36)
 private const val PREFS = "progress"
 private const val KEY_SEASON = "last_season"
 private const val KEY_EPISODE = "last_episode"
-private const val KEY_WATCHED = "watched"
 
 private enum class PageState { LOADING, READY, ERROR }
 
@@ -186,7 +185,6 @@ class MainActivity : ComponentActivity() {
                         SeriesHome(
                             selectedSeason = selectedSeason,
                             lastWatched = lastWatched,
-                            watched = watched,
                             onSeasonSelected = { selectedSeason = it },
                             onEpisodeSelected = { season, episode ->
                                 openEpisode(season, episode)
@@ -306,7 +304,7 @@ class MainActivity : ComponentActivity() {
                 </style>
               </head>
               <body>
-                <iframe id="player" src="$safeUrl" allow="autoplay; fullscreen; picture-in-picture; encrypted-media" allowfullscreen></iframe>
+                <iframe id="player" src="$safeUrl" onload="console.log('LORDSERIAL_PLAYER_FRAME_READY')" allow="autoplay; fullscreen; picture-in-picture; encrypted-media" allowfullscreen></iframe>
               </body>
             </html>
         """.trimIndent()
@@ -333,7 +331,6 @@ class MainActivity : ComponentActivity() {
     private fun SeriesHome(
         selectedSeason: Int,
         lastWatched: Pair<Int, Int>?,
-        watched: Set<String>,
         onSeasonSelected: (Int) -> Unit,
         onEpisodeSelected: (Int, Int) -> Unit
     ) {
@@ -410,7 +407,7 @@ class MainActivity : ComponentActivity() {
                         colors = chipColors()
                     ) {
                         Text(
-                            if ("$selectedSeason:$episode" in watched) "Серия $episode  ✓" else "Серия $episode",
+                            "Серия $episode",
                             fontSize = 17.sp
                         )
                     }
@@ -541,14 +538,20 @@ class MainActivity : ComponentActivity() {
 
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
-                pageState = PageState.READY
-                // The top document is our minimal black shell. The only visible content is
-                // the verified Player 1 embed in a full-screen iframe.
+                pageState = PageState.LOADING
+                // Wait for the embedded Player 1 frame, not just the local shell.
                 view.requestFocus()
                 runPlayerCommand("resume", progress.getInt(KEY_SEASON, 1), progress.getInt(KEY_EPISODE, 1))
             }
         }
-        webChromeClient = WebChromeClient()
+        webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(message: android.webkit.ConsoleMessage): Boolean {
+                if (message.message() == "LORDSERIAL_PLAYER_FRAME_READY") {
+                    pageState = PageState.READY
+                }
+                return true
+            }
+        }
         setOnKeyListener { _, keyCode, event ->
             if (event.action == KeyEvent.ACTION_DOWN &&
                 (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || keyCode == KeyEvent.KEYCODE_SPACE)
