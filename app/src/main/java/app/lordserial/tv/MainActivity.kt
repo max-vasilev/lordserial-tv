@@ -117,6 +117,16 @@ class MainActivity : ComponentActivity() {
             // cross-origin iframe, the browser security model intentionally prevents access.
             LaunchedEffect(selectedSeason, selectedEpisode) {
                 if (selectedEpisode != 0) {
+                    delay(30_000)
+                    if (pageState == PageState.LOADING) {
+                        pageError = "Плеер не ответил за 30 секунд. Проверь сеть и VPN."
+                        pageState = PageState.ERROR
+                    }
+                }
+            }
+
+            LaunchedEffect(selectedSeason, selectedEpisode) {
+                if (selectedEpisode != 0) {
                     while (true) {
                         saveCurrentPosition(selectedSeason, selectedEpisode)
                         delay(5_000)
@@ -365,7 +375,11 @@ class MainActivity : ComponentActivity() {
                 </style>
               </head>
               <body>
-                <iframe id="player" src="$safeUrl" onload="console.log('LORDSERIAL_PLAYER_FRAME_READY')" allow="autoplay; fullscreen; picture-in-picture; encrypted-media" allowfullscreen></iframe>
+                <iframe id="player" src="$safeUrl"
+                  onload="console.log('LORDSERIAL_PLAYER_FRAME_READY')"
+                  onerror="console.log('LORDSERIAL_PLAYER_FRAME_ERROR')"
+                  allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+                  allowfullscreen></iframe>
               </body>
             </html>
         """.trimIndent()
@@ -614,8 +628,12 @@ class MainActivity : ComponentActivity() {
         }
         webChromeClient = object : WebChromeClient() {
             override fun onConsoleMessage(message: android.webkit.ConsoleMessage): Boolean {
-                if (message.message() == "LORDSERIAL_PLAYER_FRAME_READY") {
-                    pageState = PageState.READY
+                when (message.message()) {
+                    "LORDSERIAL_PLAYER_FRAME_READY" -> pageState = PageState.READY
+                    "LORDSERIAL_PLAYER_FRAME_ERROR" -> {
+                        pageError = "Не удалось загрузить Player 1."
+                        pageState = PageState.ERROR
+                    }
                 }
                 return true
             }
