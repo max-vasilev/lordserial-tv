@@ -3,6 +3,7 @@ package app.lordserial.tv
 import android.annotation.SuppressLint
 import android.graphics.Color
 import android.os.Bundle
+import android.os.Build
 import android.view.View
 import android.view.WindowManager
 import android.webkit.CookieManager
@@ -117,8 +118,9 @@ class MainActivity : ComponentActivity() {
             allowContentAccess = false
             javaScriptCanOpenWindowsAutomatically = false
             setSupportMultipleWindows(false)
-            safeBrowsingEnabled = true
-            userAgentString = userAgentString
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                safeBrowsingEnabled = true
+            }
         }
         val cookies = CookieManager.getInstance()
         cookies.setAcceptCookie(true)
@@ -173,6 +175,16 @@ class MainActivity : ComponentActivity() {
                 or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                 or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
             )
+    }
+
+    override fun onResume() {
+        super.onResume()
+        webView?.onResume()
+    }
+
+    override fun onPause() {
+        webView?.onPause()
+        super.onPause()
     }
 
     override fun onDestroy() {
