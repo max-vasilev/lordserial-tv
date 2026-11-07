@@ -149,9 +149,9 @@ class MainActivity : ComponentActivity() {
                     if (episodeUrl != null) {
                         AndroidView(
                             modifier = Modifier.fillMaxSize(),
-                            factory = {
+                            factory = { context ->
                                 pageState = PageState.LOADING
-                                FrameLayout(this).apply {
+                                FrameLayout(context).apply {
                                     setBackgroundColor(Color.BLACK)
                                     playerContainer = this
                                     val player = createPlayerWebView()
@@ -620,8 +620,8 @@ class MainActivity : ComponentActivity() {
 
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
-                pageState = PageState.LOADING
-                // Wait for the embedded Player 1 frame, not just the local shell.
+                // The shell finishes after its Player 1 iframe, so READY may already be set
+                // here; onPageStarted has put the state back to LOADING for this load.
                 view.requestFocus()
                 runPlayerCommand("resume", this@MainActivity.progress.getInt(KEY_SEASON, 1), this@MainActivity.progress.getInt(KEY_EPISODE, 1))
             }
