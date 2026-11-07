@@ -1,14 +1,26 @@
 # TV test plan
 
-On the MiTV-MOOQ1 (Android TV 11):
+## Native interface
+- Launch app: native player screen appears immediately; no website is visible.
+- Navigate with D-pad only; verify focus indicator and predictable focus order.
+- Open each season and episode; verify labels and episode counts.
+- Back returns to the previous native screen.
+- Continue Watching opens the last episode.
 
-1. Install the debug APK using the existing Wi-Fi ADB workflow.
-2. Confirm LordSerial TV appears in the launcher with its icon.
-3. Open the app and activate «Открыть сериал» with the remote.
-4. Confirm the site loads and the page can be navigated with the remote.
-5. Open an episode and test each of the three player options.
-6. Check playback, pause/resume, seeking, fullscreen and audio.
-7. Press Back once from fullscreen, then from the player/page, then return to the native start screen.
-8. Report player name and exact failure (if any), plus whether VPN was enabled.
+## Playback
+- Verify Player 1 playback on Xiaomi Mi TV 4A / Android TV 11 with the existing system VPN.
+- Verify play/pause, seek backward/forward, fullscreen and Back using the remote.
+- Verify no website page, browser controls, mouse cursor or HTML controls are shown.
+- Verify Player 2 and Player 3 are not exposed in the app.
 
-Do not change the TV's VPN settings for this test.
+## Resume
+- Start an episode, watch for at least 30 seconds, leave playback and reopen it.
+- Verify playback resumes near the saved position.
+- Verify progress is independent for different episodes.
+- Verify progress survives app force-stop and TV restart.
+
+## Regression
+- Audio stops when leaving playback.
+- No audio continues in background.
+- Network/VPN configuration is not modified.
+- Test cold launch, app restart, and temporary network failure.
