@@ -256,7 +256,19 @@ class MainActivity : ComponentActivity() {
           if (depth > 4) return null;
           try {
             var v = w.document.querySelector('video');
-            if (v) return v;
+            if (v) {
+              if (!w.document.getElementById('lordserial-tv-player-style')) {
+                var style = w.document.createElement('style');
+                style.id = 'lordserial-tv-player-style';
+                style.textContent =
+                  'html,body{margin:0!important;padding:0!important;width:100%!important;height:100%!important;overflow:hidden!important;background:#000!important}' +
+                  'body *{visibility:hidden!important}' +
+                  'video{visibility:visible!important;position:fixed!important;inset:0!important;width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;object-fit:contain!important;background:#000!important}' +
+                  'video::-webkit-media-controls{display:none!important}';
+                (w.document.head || w.document.documentElement).appendChild(style);
+              }
+              return v;
+            }
             var frames = w.document.querySelectorAll('iframe');
             for (var i = 0; i < frames.length; i++) {
               try {
