@@ -1,12 +1,10 @@
 package app.lordserial.tv
 
 import android.annotation.SuppressLint
-import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Bundle
-import android.os.Build
+import android.view.KeyEvent
 import android.view.View
-import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
@@ -49,8 +47,9 @@ import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import androidx.tv.material3.darkColorScheme
+import kotlinx.coroutines.delay
 
-private const val SERIES_URL = "https://ochen-strannye-dela-lordserial.club/"
+private const val PLAYER_BASE_URL = "https://api.namy.ws/embed/movie/354"
 private val EPISODE_COUNTS = listOf(8, 9, 8, 9, 8)
 private val BACKGROUND = ComposeColor(0xFF090B12)
 private val SURFACE = ComposeColor(0xFF1C1F2B)
@@ -66,9 +65,6 @@ private enum class PageState { LOADING, READY, ERROR }
 
 class MainActivity : ComponentActivity() {
     private var webView: WebView? = null
-    private var customView: View? = null
-    private var customViewCallback: WebChromeClient.CustomViewCallback? = null
-    private var isFullscreen = false
     private var pageState by mutableStateOf(PageState.LOADING)
     private var pageError by mutableStateOf("")
     private val progress by lazy { getSharedPreferences(PREFS, MODE_PRIVATE) }
@@ -85,32 +81,39 @@ class MainActivity : ComponentActivity() {
             var watched by remember {
                 mutableStateOf(progress.getStringSet(KEY_WATCHED, null)?.toSet() ?: emptySet())
             }
+            var controlsVisible by remember { mutableStateOf(true) }
             val episodeUrl = if (selectedEpisode == 0) null else
-                "${SERIES_URL}season-$selectedSeason/episode-$selectedEpisode"
+                "$PLAYER_BASE_URL?episode=$selectedEpisode&season=$selectedSeason"
 
             fun openEpisode(season: Int, episode: Int) {
                 selectedSeason = season
                 selectedEpisode = episode
                 lastWatched = season to episode
-                watched = watched + "$season:$episode"
                 progress.edit()
                     .putInt(KEY_SEASON, season)
                     .putInt(KEY_EPISODE, episode)
-                    .putStringSet(KEY_WATCHED, watched)
                     .apply()
+                controlsVisible = true
             }
 
             fun closeEpisode() {
+                saveCurrentPosition(selectedSeason, selectedEpisode)
                 closePlayer()
                 selectedEpisode = 0
             }
 
             BackHandler(enabled = selectedEpisode != 0) {
-                val view = webView
-                when {
-                    isFullscreen -> exitFullscreen()
-                    pageState == PageState.READY && view?.canGoBack() == true -> view.goBack()
-                    else -> closeEpisode()
+                if (controlsVisible) controlsVisible = false else closeEpisode()
+            }
+
+            // Poll only the top-level HTML5 video. If the provider nests its player in a
+            // cross-origin iframe, the browser security model intentionally prevents access.
+            LaunchedEffect(selectedSeason, selectedEpisode) {
+                if (selectedEpisode != 0) {
+                    while (true) {
+                        saveCurrentPosition(selectedSeason, selectedEpisode)
+                        delay(5_000)
+                    }
                 }
             }
 
@@ -131,23 +134,44 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.fillMaxSize(),
                             factory = {
                                 pageState = PageState.LOADING
-                                createWebView().also {
+                                createPlayerWebView().also {
                                     webView = it
                                     it.loadUrl(episodeUrl)
                                 }
                             },
-                            // A WebView per episode: leaving the episode releases it, so its audio
-                            // stops and Back never walks into the previous episode's history.
-                            onRelease = { it.destroy() }
+                            onRelease = {
+                                saveCurrentPosition(selectedSeason, selectedEpisode)
+                                it.stopLoading()
+                                it.onPause()
+                                it.destroy()
+                                if (webView === it) webView = null
+                            }
                         )
-                        when (pageState) {
-                            PageState.LOADING -> LoadingOverlay(selectedSeason, selectedEpisode)
-                            PageState.ERROR -> ErrorOverlay(
-                                detail = pageError,
-                                onRetry = { webView?.loadUrl(episodeUrl) },
-                                onClose = { closeEpisode() }
+
+                        if (controlsVisible) {
+                            PlayerOverlay(
+                                season = selectedSeason,
+                                episode = selectedEpisode,
+                                state = pageState,
+                                error = pageError,
+                                onPlayPause = { runPlayerCommand("toggle") },
+                                onBack = { closeEpisode() },
+                                onRetry = { webView?.reload() },
+                                onHide = { controlsVisible = false }
                             )
-                            PageState.READY -> Unit
+                        } else {
+                            // The player remains the only visible content. OK brings back
+                            // native controls; Back returns to the native episode selector.
+                            Box(
+                                modifier = Modifier.fillMaxSize(),
+                                contentAlignment = Alignment.BottomEnd
+                            ) {
+                                Button(
+                                    onClick = { controlsVisible = true },
+                                    modifier = Modifier.padding(28.dp),
+                                    colors = chipColors()
+                                ) { Text("Управление", fontSize = 16.sp) }
+                            }
                         }
                     } else {
                         SeriesHome(
@@ -155,12 +179,47 @@ class MainActivity : ComponentActivity() {
                             lastWatched = lastWatched,
                             watched = watched,
                             onSeasonSelected = { selectedSeason = it },
-                            onEpisodeSelected = { season, episode -> openEpisode(season, episode) }
+                            onEpisodeSelected = { season, episode ->
+                                openEpisode(season, episode)
+                            }
                         )
                     }
                 }
             }
         }
+    }
+
+    private fun progressKey(season: Int, episode: Int) = "position_${season}_${episode}"
+
+    private fun saveCurrentPosition(season: Int, episode: Int) {
+        if (episode == 0) return
+        val key = progressKey(season, episode)
+        webView?.evaluateJavascript(
+            "(function(){var v=document.querySelector('video');return v?Math.floor(v.currentTime||0):0})()"
+        ) { raw ->
+            val seconds = raw?.trim()?.trim('"')?.toLongOrNull() ?: 0L
+            if (seconds > 0L) progress.edit().putLong(key, seconds).apply()
+        }
+    }
+
+    private fun runPlayerCommand(command: String) {
+        val saved = progress.getLong(progressKey(
+            progress.getInt(KEY_SEASON, 1),
+            progress.getInt(KEY_EPISODE, 1)
+        ), 0L)
+        val js = when (command) {
+            "toggle" -> """
+                (function(){
+                  var v=document.querySelector('video');
+                  if(v){ if(v.paused) v.play(); else v.pause(); return 'video'; }
+                  document.dispatchEvent(new KeyboardEvent('keydown',{key:' ',code:'Space',bubbles:true}));
+                  return 'keyboard';
+                })()
+            """.trimIndent()
+            "resume" -> "var v=document.querySelector('video'); if(v){v.currentTime=$saved;v.play()}"
+            else -> ""
+        }
+        webView?.evaluateJavascript(js, null)
     }
 
     private fun readLastWatched(): Pair<Int, Int>? {
@@ -217,20 +276,11 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             } else {
-                Text(
-                    text = "Выбери сезон и серию",
-                    fontSize = 18.sp,
-                    color = MUTED
-                )
+                Text("Выбери сезон и серию", fontSize = 18.sp, color = MUTED)
             }
 
             Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "СЕЗОНЫ",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                color = ACCENT
-            )
+            Text("СЕЗОНЫ", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = ACCENT)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -242,7 +292,7 @@ class MainActivity : ComponentActivity() {
                         colors = chipColors(selected = season == selectedSeason)
                     ) {
                         Text(
-                            text = "Сезон $season",
+                            "Сезон $season",
                             fontSize = 15.sp,
                             fontWeight = if (season == selectedSeason) FontWeight.Bold else FontWeight.Normal
                         )
@@ -252,7 +302,7 @@ class MainActivity : ComponentActivity() {
 
             Spacer(modifier = Modifier.height(2.dp))
             Text(
-                text = "СЕРИИ · СЕЗОН $selectedSeason",
+                "СЕРИИ · СЕЗОН $selectedSeason",
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
                 color = ACCENT
@@ -270,7 +320,7 @@ class MainActivity : ComponentActivity() {
                         colors = chipColors()
                     ) {
                         Text(
-                            text = if ("$selectedSeason:$episode" in watched) "Серия $episode  ✓" else "Серия $episode",
+                            if ("$selectedSeason:$episode" in watched) "Серия $episode  ✓" else "Серия $episode",
                             fontSize = 17.sp
                         )
                     }
@@ -280,57 +330,64 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun LoadingOverlay(season: Int, episode: Int) {
-        Box(
-            modifier = Modifier.fillMaxSize().background(BACKGROUND),
-            contentAlignment = Alignment.Center
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(text = "Загрузка…", fontSize = 28.sp, color = ComposeColor.White)
-                Spacer(modifier = Modifier.height(10.dp))
-                Text(text = "Сезон $season, серия $episode", fontSize = 18.sp, color = MUTED)
-            }
-        }
-    }
-
-    @Composable
-    private fun ErrorOverlay(detail: String, onRetry: () -> Unit, onClose: () -> Unit) {
-        val retryFocus = remember { FocusRequester() }
-        LaunchedEffect(Unit) { runCatching { retryFocus.requestFocus() } }
-        Box(
-            modifier = Modifier.fillMaxSize().background(BACKGROUND),
-            contentAlignment = Alignment.Center
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    text = "Не удалось открыть серию",
-                    fontSize = 28.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = ComposeColor.White
-                )
-                Spacer(modifier = Modifier.height(10.dp))
-                Text(text = "Проверь интернет и VPN", fontSize = 18.sp, color = MUTED)
-                if (detail.isNotBlank()) {
-                    Text(text = detail, fontSize = 14.sp, color = MUTED)
-                }
-                Spacer(modifier = Modifier.height(24.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    Button(
-                        onClick = onRetry,
-                        modifier = Modifier.focusRequester(retryFocus),
-                        colors = chipColors()
-                    ) { Text(text = "Повторить", fontSize = 17.sp) }
-                    Button(onClick = onClose, colors = chipColors()) {
-                        Text(text = "К списку серий", fontSize = 17.sp)
+    private fun PlayerOverlay(
+        season: Int,
+        episode: Int,
+        state: PageState,
+        error: String,
+        onPlayPause: () -> Unit,
+        onBack: () -> Unit,
+        onRetry: () -> Unit,
+        onHide: () -> Unit
+    ) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
+            Column(
+                modifier = Modifier.fillMaxWidth().background(ComposeColor(0xDD090B12)).padding(
+                    horizontal = 42.dp, vertical = 22.dp
+                ),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column {
+                        Text(
+                            "ОЧЕНЬ СТРАННЫЕ ДЕЛА",
+                            fontSize = 19.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ComposeColor.White
+                        )
+                        Text("Сезон $season · Серия $episode", fontSize = 15.sp, color = MUTED)
                     }
+                    when (state) {
+                        PageState.LOADING -> Text("Подключаем плеер…", color = MUTED)
+                        PageState.READY -> Text("Player 1", color = ComposeColor(0xFFB8E6C2))
+                        PageState.ERROR -> Text("Ошибка загрузки", color = ComposeColor(0xFFFF7777))
+                    }
+                }
+                if (state == PageState.ERROR) {
+                    Text(error.ifBlank { "Проверь подключение и VPN" }, color = MUTED, fontSize = 14.sp)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    if (state == PageState.ERROR) {
+                        Button(onClick = onRetry, colors = chipColors()) { Text("Повторить") }
+                    } else {
+                        Button(onClick = onPlayPause, colors = chipColors()) { Text("Пауза / Play") }
+                    }
+                    Button(onClick = onHide, colors = chipColors()) { Text("Скрыть панель") }
+                    Button(onClick = onBack, colors = chipColors()) { Text("К сериям") }
                 }
             }
         }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun createWebView(): WebView = WebView(this).apply {
+    private fun createPlayerWebView(): WebView = WebView(this).apply {
         setBackgroundColor(Color.BLACK)
+        isFocusable = true
+        isFocusableInTouchMode = true
         settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -342,20 +399,18 @@ class MainActivity : ComponentActivity() {
             allowContentAccess = false
             javaScriptCanOpenWindowsAutomatically = false
             setSupportMultipleWindows(false)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                safeBrowsingEnabled = true
-            }
         }
-        val cookies = CookieManager.getInstance()
-        cookies.setAcceptCookie(true)
-        cookies.setAcceptThirdPartyCookies(this, true)
+        CookieManager.getInstance().apply {
+            setAcceptCookie(true)
+            setAcceptThirdPartyCookies(this@apply, true)
+        }
         webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val scheme = request.url.scheme?.lowercase()
                 return scheme != "http" && scheme != "https"
             }
 
-            override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+            override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
                 super.onPageStarted(view, url, favicon)
                 pageError = ""
                 pageState = PageState.LOADING
@@ -383,80 +438,48 @@ class MainActivity : ComponentActivity() {
 
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
-                if (pageState == PageState.LOADING) {
-                    pageState = PageState.READY
-                    view.requestFocus()
-                }
-                // Player 1 is the only option verified to work on the target TV.
-                // Select it when an episode page finishes loading, unless the site already did:
-                // clicking the active player reloads its iframe for nothing.
-                if (url.contains("/season-") && url.contains("/episode-")) {
-                    view.evaluateJavascript(
-                        """
-                        (function() {
-                          if (window.__lordSerialPlayer1Selected) return;
-                          var controls = Array.from(document.querySelectorAll(
-                            'button, a, [role="button"], [onclick]'
-                          ));
-                          var player1 = controls.find(function(el) {
-                            return (el.innerText || el.textContent || '')
-                              .replace(/\\s+/g, ' ').trim().toLowerCase() === 'плеер 1';
-                          });
-                          if (player1) {
-                            window.__lordSerialPlayer1Selected = true;
-                            if (!player1.classList.contains('active')) player1.click();
-                          }
-                        })();
-                        """.trimIndent(),
-                        null
-                    )
-                }
+                pageState = PageState.READY
+                // Keep the embed viewport focused on its playback surface where possible.
+                view.evaluateJavascript(
+                    """
+                    (function(){
+                      var css = 'html,body{margin:0!important;padding:0!important;background:#000!important;overflow:hidden!important}' +
+                        'video,iframe{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;border:0!important;object-fit:contain!important}';
+                      var style=document.createElement('style');style.textContent=css;
+                      (document.head||document.documentElement).appendChild(style);
+                    })();
+                    """.trimIndent(),
+                    null
+                )
+                view.requestFocus()
+                runPlayerCommand("resume")
             }
         }
         webChromeClient = object : WebChromeClient() {
             override fun onShowCustomView(view: View, callback: CustomViewCallback) {
-                if (customView != null) {
-                    callback.onCustomViewHidden()
-                    return
-                }
-                customView = view
-                customViewCallback = callback
-                isFullscreen = true
-                (window.decorView as ViewGroup).addView(
-                    view,
-                    ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                )
+                // The embed may request fullscreen; retain the native activity's immersive mode.
                 applyImmersiveMode()
             }
-
-            override fun onHideCustomView() = exitFullscreen()
+        }
+        setOnKeyListener { _, keyCode, event ->
+            if (event.action == KeyEvent.ACTION_DOWN &&
+                keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+            ) {
+                runPlayerCommand("toggle")
+                true
+            } else false
         }
     }
 
-    /** Stops the episode's WebView at once; the AndroidView destroys it when it leaves the screen. */
     private fun closePlayer() {
-        exitFullscreen()
         webView?.apply {
             stopLoading()
             onPause()
             loadUrl("about:blank")
-            webChromeClient = null
+            destroy()
         }
         webView = null
         pageState = PageState.LOADING
-    }
-
-    private fun exitFullscreen() {
-        val view = customView ?: return
-        (window.decorView as ViewGroup).removeView(view)
-        customView = null
-        customViewCallback?.onCustomViewHidden()
-        customViewCallback = null
-        isFullscreen = false
-        applyImmersiveMode()
     }
 
     private fun applyImmersiveMode() {
@@ -482,8 +505,10 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        // The WebView itself is destroyed by the AndroidView's onRelease.
-        exitFullscreen()
+        webView?.apply {
+            stopLoading()
+            destroy()
+        }
         webView = null
         super.onDestroy()
     }
