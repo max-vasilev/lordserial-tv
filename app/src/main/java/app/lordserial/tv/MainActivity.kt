@@ -7,6 +7,7 @@ import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.FrameLayout
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -68,6 +69,7 @@ class MainActivity : ComponentActivity() {
     private var pageState by mutableStateOf(PageState.LOADING)
     private var pageError by mutableStateOf("")
     private var isFullscreen by mutableStateOf(false)
+    private var playerContainer: FrameLayout? = null
     private var fullscreenView: View? = null
     private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
     private val progress by lazy { getSharedPreferences(PREFS, MODE_PRIVATE) }
@@ -140,9 +142,19 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.fillMaxSize(),
                             factory = {
                                 pageState = PageState.LOADING
-                                createPlayerWebView().also {
-                                    webView = it
-                                    it.loadDataWithBaseURL(
+                                FrameLayout(this).apply {
+                                    setBackgroundColor(Color.BLACK)
+                                    playerContainer = this
+                                    val player = createPlayerWebView()
+                                    webView = player
+                                    addView(
+                                        player,
+                                        FrameLayout.LayoutParams(
+                                            FrameLayout.LayoutParams.MATCH_PARENT,
+                                            FrameLayout.LayoutParams.MATCH_PARENT
+                                        )
+                                    )
+                                    player.loadDataWithBaseURL(
                                         "https://api.namy.ws/",
                                         playerShellHtml(episodeUrl),
                                         "text/html",
@@ -153,11 +165,8 @@ class MainActivity : ComponentActivity() {
                             },
                             onRelease = {
                                 saveCurrentPosition(selectedSeason, selectedEpisode)
-                                hideCustomView()
-                                it.stopLoading()
-                                it.onPause()
-                                it.destroy()
-                                if (webView === it) webView = null
+                                closePlayer()
+                                playerContainer = null
                             }
                         )
 
@@ -613,11 +622,11 @@ class MainActivity : ComponentActivity() {
                 fullscreenView = view
                 fullscreenCallback = callback
                 view.setBackgroundColor(Color.BLACK)
-                addView(
+                playerContainer?.addView(
                     view,
-                    ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT
                     )
                 )
                 view.bringToFront()
@@ -645,7 +654,7 @@ class MainActivity : ComponentActivity() {
 
     private fun hideCustomView() {
         fullscreenView?.let { view ->
-            webView?.removeView(view)
+            playerContainer?.removeView(view)
         }
         fullscreenView = null
         fullscreenCallback?.onCustomViewHidden()
