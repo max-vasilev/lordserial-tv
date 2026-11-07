@@ -97,9 +97,15 @@ class MainActivity : ComponentActivity() {
             }
 
             fun closeEpisode() {
-                saveCurrentPosition(selectedSeason, selectedEpisode)
-                closePlayer()
-                selectedEpisode = 0
+                val season = selectedSeason
+                val episode = selectedEpisode
+                readCurrentPosition { seconds ->
+                    if (seconds != null && episode != 0) {
+                        progress.edit().putLong(progressKey(season, episode), seconds).apply()
+                    }
+                    closePlayer()
+                    selectedEpisode = 0
+                }
             }
 
             BackHandler(enabled = selectedEpisode != 0) {
@@ -203,10 +209,13 @@ class MainActivity : ComponentActivity() {
 
     private fun progressKey(season: Int, episode: Int) = "position_${season}_${episode}"
 
-    private fun saveCurrentPosition(season: Int, episode: Int) {
-        if (episode == 0) return
-        val key = progressKey(season, episode)
-        webView?.evaluateJavascript(
+    private fun readCurrentPosition(onRead: (Long?) -> Unit) {
+        val currentWebView = webView
+        if (currentWebView == null) {
+            onRead(null)
+            return
+        }
+        currentWebView.evaluateJavascript(
             """
             (function(){
               function findVideo(w, depth) {
@@ -217,8 +226,7 @@ class MainActivity : ComponentActivity() {
                   var frames = w.document.querySelectorAll('iframe');
                   for (var i = 0; i < frames.length; i++) {
                     try {
-                      var child = frames[i].contentWindow;
-                      var found = findVideo(child, depth + 1);
+                      var found = findVideo(frames[i].contentWindow, depth + 1);
                       if (found) return found;
                     } catch (e) {}
                   }
@@ -230,8 +238,16 @@ class MainActivity : ComponentActivity() {
             })()
             """.trimIndent()
         ) { raw ->
-            val seconds = raw?.trim()?.trim('"')?.toLongOrNull()
-            if (seconds != null) progress.edit().putLong(key, seconds).apply()
+            onRead(raw?.trim()?.trim('"')?.toLongOrNull())
+        }
+    }
+
+    private fun saveCurrentPosition(season: Int, episode: Int) {
+        if (episode == 0) return
+        readCurrentPosition { seconds ->
+            if (seconds != null) {
+                progress.edit().putLong(progressKey(season, episode), seconds).apply()
+            }
         }
     }
 
