@@ -5,6 +5,7 @@ import android.graphics.Color
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
@@ -66,6 +67,9 @@ class MainActivity : ComponentActivity() {
     private var webView: WebView? = null
     private var pageState by mutableStateOf(PageState.LOADING)
     private var pageError by mutableStateOf("")
+    private var isFullscreen by mutableStateOf(false)
+    private var fullscreenView: View? = null
+    private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
     private val progress by lazy { getSharedPreferences(PREFS, MODE_PRIVATE) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -99,7 +103,7 @@ class MainActivity : ComponentActivity() {
             }
 
             BackHandler(enabled = selectedEpisode != 0) {
-                closeEpisode()
+                if (fullscreenView != null) hideCustomView() else closeEpisode()
             }
 
             // Poll only the top-level HTML5 video. If the provider nests its player in a
@@ -143,6 +147,7 @@ class MainActivity : ComponentActivity() {
                             },
                             onRelease = {
                                 saveCurrentPosition(selectedSeason, selectedEpisode)
+                                hideCustomView()
                                 it.stopLoading()
                                 it.onPause()
                                 it.destroy()
@@ -150,7 +155,7 @@ class MainActivity : ComponentActivity() {
                             }
                         )
 
-                        if (controlsVisible) {
+                        if (controlsVisible && !isFullscreen) {
                             PlayerOverlay(
                                 season = selectedSeason,
                                 episode = selectedEpisode,
@@ -260,6 +265,12 @@ class MainActivity : ComponentActivity() {
                   if (f) { try { f.contentWindow.focus(); } catch(e) {} }
                   return 'player-frame';
                 })()
+            """.trimIndent()
+            "play" -> """
+                (function(){ ${findVideoJs()} var v=findVideo(window,0); if(v) v.play().catch(function(){}); })()
+            """.trimIndent()
+            "pause" -> """
+                (function(){ ${findVideoJs()} var v=findVideo(window,0); if(v) v.pause(); })()
             """.trimIndent()
             "seek-back" -> """
                 (function(){ ${findVideoJs()} var v=findVideo(window,0); if(v) v.currentTime=Math.max(0,v.currentTime-10); })()
@@ -551,6 +562,30 @@ class MainActivity : ComponentActivity() {
                 }
                 return true
             }
+
+            override fun onShowCustomView(view: View, callback: CustomViewCallback) {
+                if (fullscreenView != null) {
+                    callback.onCustomViewHidden()
+                    return
+                }
+                fullscreenView = view
+                fullscreenCallback = callback
+                view.setBackgroundColor(Color.BLACK)
+                addView(
+                    view,
+                    ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                )
+                view.bringToFront()
+                isFullscreen = true
+                applyImmersiveMode()
+            }
+
+            override fun onHideCustomView() {
+                hideCustomView()
+            }
         }
         setOnKeyListener { _, keyCode, event ->
             if (event.action == KeyEvent.ACTION_DOWN &&
@@ -566,7 +601,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun hideCustomView() {
+        fullscreenView?.let { view ->
+            webView?.removeView(view)
+        }
+        fullscreenView = null
+        fullscreenCallback?.onCustomViewHidden()
+        fullscreenCallback = null
+        isFullscreen = false
+        applyImmersiveMode()
+    }
+
     private fun closePlayer() {
+        hideCustomView()
         webView?.apply {
             stopLoading()
             onPause()
@@ -587,6 +634,38 @@ class MainActivity : ComponentActivity() {
                 or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                 or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
             )
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN &&
+            progress.getInt(KEY_EPISODE, 0) != 0
+        ) {
+            val season = progress.getInt(KEY_SEASON, 1)
+            val episode = progress.getInt(KEY_EPISODE, 1)
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
+                    runPlayerCommand("toggle", season, episode)
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_PLAY -> {
+                    runPlayerCommand("play", season, episode)
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                    runPlayerCommand("pause", season, episode)
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                    runPlayerCommand("seek-back", season, episode)
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                    runPlayerCommand("seek-forward", season, episode)
+                    return true
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onResume() {
