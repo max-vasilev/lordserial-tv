@@ -47,7 +47,6 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             var showWeb by remember { mutableStateOf(false) }
-            var pageTitle by remember { mutableStateOf("Очень странные дела") }
 
             BackHandler(enabled = showWeb) {
                 val view = webView
@@ -123,7 +122,7 @@ class MainActivity : ComponentActivity() {
         }
         CookieManager.getInstance().apply {
             setAcceptCookie(true)
-            setAcceptThirdPartyCookies(this@applyWebView, true)
+            setAcceptThirdPartyCookies(this@createWebView, true)
         }
         webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -154,8 +153,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private val this@applyWebView: WebView
-        get() = webView ?: error("WebView not initialized")
 
     private fun exitFullscreen() {
         val view = customView ?: return
