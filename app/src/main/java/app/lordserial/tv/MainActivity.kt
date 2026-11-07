@@ -103,7 +103,7 @@ class MainActivity : ComponentActivity() {
             }
 
             BackHandler(enabled = selectedEpisode != 0) {
-                if (controlsVisible) controlsVisible = false else closeEpisode()
+                closeEpisode()
             }
 
             // Poll only the top-level HTML5 video. If the provider nests its player in a
@@ -160,15 +160,19 @@ class MainActivity : ComponentActivity() {
                                 onHide = { controlsVisible = false }
                             )
                         } else {
-                            // The player remains the only visible content. OK brings back
-                            // native controls; Back returns to the native episode selector.
+                            // The player remains the only visible content. Back always returns
+                            // to the native episode selector.
+                            val controlsFocus = remember { FocusRequester() }
+                            LaunchedEffect(selectedEpisode, controlsVisible) {
+                                runCatching { controlsFocus.requestFocus() }
+                            }
                             Box(
                                 modifier = Modifier.fillMaxSize(),
                                 contentAlignment = Alignment.BottomEnd
                             ) {
                                 Button(
                                     onClick = { controlsVisible = true },
-                                    modifier = Modifier.padding(28.dp),
+                                    modifier = Modifier.padding(28.dp).focusRequester(controlsFocus),
                                     colors = chipColors()
                                 ) { Text("Управление", fontSize = 16.sp) }
                             }
@@ -340,6 +344,8 @@ class MainActivity : ComponentActivity() {
         onRetry: () -> Unit,
         onHide: () -> Unit
     ) {
+        val firstControlFocus = remember { FocusRequester() }
+        LaunchedEffect(Unit) { runCatching { firstControlFocus.requestFocus() } }
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
             Column(
                 modifier = Modifier.fillMaxWidth().background(ComposeColor(0xDD090B12)).padding(
@@ -372,9 +378,17 @@ class MainActivity : ComponentActivity() {
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                     if (state == PageState.ERROR) {
-                        Button(onClick = onRetry, colors = chipColors()) { Text("Повторить") }
+                        Button(
+                            onClick = onRetry,
+                            modifier = Modifier.focusRequester(firstControlFocus),
+                            colors = chipColors()
+                        ) { Text("Повторить") }
                     } else {
-                        Button(onClick = onPlayPause, colors = chipColors()) { Text("Пауза / Play") }
+                        Button(
+                            onClick = onPlayPause,
+                            modifier = Modifier.focusRequester(firstControlFocus),
+                            colors = chipColors()
+                        ) { Text("Пауза / Play") }
                     }
                     Button(onClick = onHide, colors = chipColors()) { Text("Скрыть панель") }
                     Button(onClick = onBack, colors = chipColors()) { Text("К сериям") }
