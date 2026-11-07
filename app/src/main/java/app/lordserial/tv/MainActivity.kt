@@ -78,9 +78,6 @@ class MainActivity : ComponentActivity() {
             var selectedSeason by remember { mutableIntStateOf(progress.getInt(KEY_SEASON, 1)) }
             var selectedEpisode by remember { mutableIntStateOf(0) }
             var lastWatched by remember { mutableStateOf(readLastWatched()) }
-            var watched by remember {
-                mutableStateOf(progress.getStringSet(KEY_WATCHED, null)?.toSet() ?: emptySet())
-            }
             var controlsVisible by remember { mutableStateOf(true) }
             val episodeUrl = if (selectedEpisode == 0) null else
                 "$PLAYER_BASE_URL?episode=$selectedEpisode&season=$selectedSeason"
@@ -136,7 +133,13 @@ class MainActivity : ComponentActivity() {
                                 pageState = PageState.LOADING
                                 createPlayerWebView().also {
                                     webView = it
-                                    it.loadUrl(episodeUrl)
+                                    it.loadDataWithBaseURL(
+                                        "https://api.namy.ws/",
+                                        playerShellHtml(episodeUrl),
+                                        "text/html",
+                                        "UTF-8",
+                                        null
+                                    )
                                 }
                             },
                             onRelease = {
@@ -154,7 +157,9 @@ class MainActivity : ComponentActivity() {
                                 episode = selectedEpisode,
                                 state = pageState,
                                 error = pageError,
-                                onPlayPause = { runPlayerCommand("toggle") },
+                                onPlayPause = { runPlayerCommand("toggle", selectedSeason, selectedEpisode) },
+                                onSeekBack = { runPlayerCommand("seek-back", selectedSeason, selectedEpisode) },
+                                onSeekForward = { runPlayerCommand("seek-forward", selectedSeason, selectedEpisode) },
                                 onBack = { closeEpisode() },
                                 onRetry = { webView?.reload() },
                                 onHide = { controlsVisible = false }
@@ -199,31 +204,112 @@ class MainActivity : ComponentActivity() {
         if (episode == 0) return
         val key = progressKey(season, episode)
         webView?.evaluateJavascript(
-            "(function(){var v=document.querySelector('video');return v?Math.floor(v.currentTime||0):0})()"
+            """
+            (function(){
+              function findVideo(w, depth) {
+                if (depth > 4) return null;
+                try {
+                  var v = w.document.querySelector('video');
+                  if (v) return v;
+                  var frames = w.document.querySelectorAll('iframe');
+                  for (var i = 0; i < frames.length; i++) {
+                    try {
+                      var child = frames[i].contentWindow;
+                      var found = findVideo(child, depth + 1);
+                      if (found) return found;
+                    } catch (e) {}
+                  }
+                } catch (e) {}
+                return null;
+              }
+              var v = findVideo(window, 0);
+              return v ? Math.floor(v.currentTime || 0) : 0;
+            })()
+            """.trimIndent()
         ) { raw ->
             val seconds = raw?.trim()?.trim('"')?.toLongOrNull() ?: 0L
             if (seconds > 0L) progress.edit().putLong(key, seconds).apply()
         }
     }
 
-    private fun runPlayerCommand(command: String) {
-        val saved = progress.getLong(progressKey(
-            progress.getInt(KEY_SEASON, 1),
-            progress.getInt(KEY_EPISODE, 1)
-        ), 0L)
+    private fun findVideoJs(): String = """
+        function findVideo(w, depth) {
+          if (depth > 4) return null;
+          try {
+            var v = w.document.querySelector('video');
+            if (v) return v;
+            var frames = w.document.querySelectorAll('iframe');
+            for (var i = 0; i < frames.length; i++) {
+              try {
+                var found = findVideo(frames[i].contentWindow, depth + 1);
+                if (found) return found;
+              } catch (e) {}
+            }
+          } catch (e) {}
+          return null;
+        }
+    """.trimIndent()
+
+    private fun runPlayerCommand(command: String, season: Int, episode: Int) {
+        val saved = progress.getLong(progressKey(season, episode), 0L)
         val js = when (command) {
             "toggle" -> """
                 (function(){
-                  var v=document.querySelector('video');
-                  if(v){ if(v.paused) v.play(); else v.pause(); return 'video'; }
-                  document.dispatchEvent(new KeyboardEvent('keydown',{key:' ',code:'Space',bubbles:true}));
-                  return 'keyboard';
+                  ${findVideoJs()}
+                  var v = findVideo(window, 0);
+                  if (v) { if (v.paused) v.play(); else v.pause(); return 'video'; }
+                  var f = document.querySelector('iframe');
+                  if (f) { try { f.contentWindow.focus(); } catch(e) {} }
+                  return 'player-frame';
                 })()
             """.trimIndent()
-            "resume" -> "var v=document.querySelector('video'); if(v){v.currentTime=$saved;v.play()}"
+            "seek-back" -> """
+                (function(){ ${findVideoJs()} var v=findVideo(window,0); if(v) v.currentTime=Math.max(0,v.currentTime-10); })()
+            """.trimIndent()
+            "seek-forward" -> """
+                (function(){ ${findVideoJs()} var v=findVideo(window,0); if(v) v.currentTime=Math.min(v.duration||1e9,v.currentTime+10); })()
+            """.trimIndent()
+            "resume" -> """
+                (function(){
+                  ${findVideoJs()}
+                  var saved = $saved;
+                  var attempts = 0;
+                  function restore() {
+                    var v = findVideo(window, 0);
+                    if (v && v.readyState >= 1) {
+                      if (saved > 0 && Math.abs(v.currentTime - saved) > 3) v.currentTime = saved;
+                      v.play().catch(function(){});
+                      return;
+                    }
+                    if (attempts++ < 40) setTimeout(restore, 500);
+                  }
+                  restore();
+                })()
+            """.trimIndent()
             else -> ""
         }
         webView?.evaluateJavascript(js, null)
+    }
+
+    private fun playerShellHtml(embedUrl: String): String {
+        val safeUrl = embedUrl.replace("&", "&amp;").replace("\"", "&quot;")
+        return """
+            <!doctype html>
+            <html>
+              <head>
+                <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+                <meta charset="utf-8">
+                <style>
+                  * { box-sizing: border-box; }
+                  html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#000; }
+                  iframe { position:fixed; inset:0; width:100%; height:100%; border:0; background:#000; }
+                </style>
+              </head>
+              <body>
+                <iframe id="player" src="$safeUrl" allow="autoplay; fullscreen; picture-in-picture; encrypted-media" allowfullscreen></iframe>
+              </body>
+            </html>
+        """.trimIndent()
     }
 
     private fun readLastWatched(): Pair<Int, Int>? {
@@ -340,6 +426,8 @@ class MainActivity : ComponentActivity() {
         state: PageState,
         error: String,
         onPlayPause: () -> Unit,
+        onSeekBack: () -> Unit,
+        onSeekForward: () -> Unit,
         onBack: () -> Unit,
         onRetry: () -> Unit,
         onHide: () -> Unit
@@ -384,11 +472,13 @@ class MainActivity : ComponentActivity() {
                             colors = chipColors()
                         ) { Text("Повторить") }
                     } else {
+                        Button(onClick = onSeekBack, colors = chipColors()) { Text("−10 сек") }
                         Button(
                             onClick = onPlayPause,
                             modifier = Modifier.focusRequester(firstControlFocus),
                             colors = chipColors()
                         ) { Text("Пауза / Play") }
+                        Button(onClick = onSeekForward, colors = chipColors()) { Text("+10 сек") }
                     }
                     Button(onClick = onHide, colors = chipColors()) { Text("Скрыть панель") }
                     Button(onClick = onBack, colors = chipColors()) { Text("К сериям") }
@@ -452,28 +542,22 @@ class MainActivity : ComponentActivity() {
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
                 pageState = PageState.READY
-                // Keep the embed viewport focused on its playback surface where possible.
-                view.evaluateJavascript(
-                    """
-                    (function(){
-                      var css = 'html,body{margin:0!important;padding:0!important;background:#000!important;overflow:hidden!important}' +
-                        'video,iframe{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;border:0!important;object-fit:contain!important}';
-                      var style=document.createElement('style');style.textContent=css;
-                      (document.head||document.documentElement).appendChild(style);
-                    })();
-                    """.trimIndent(),
-                    null
-                )
+                // The top document is our minimal black shell. The only visible content is
+                // the verified Player 1 embed in a full-screen iframe.
                 view.requestFocus()
-                runPlayerCommand("resume")
+                runPlayerCommand("resume", progress.getInt(KEY_SEASON, 1), progress.getInt(KEY_EPISODE, 1))
             }
         }
         webChromeClient = WebChromeClient()
         setOnKeyListener { _, keyCode, event ->
             if (event.action == KeyEvent.ACTION_DOWN &&
-                keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+                (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || keyCode == KeyEvent.KEYCODE_SPACE)
             ) {
-                runPlayerCommand("toggle")
+                runPlayerCommand(
+                    "toggle",
+                    progress.getInt(KEY_SEASON, 1),
+                    progress.getInt(KEY_EPISODE, 1)
+                )
                 true
             } else false
         }
