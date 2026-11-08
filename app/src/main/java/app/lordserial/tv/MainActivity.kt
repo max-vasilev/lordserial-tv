@@ -69,9 +69,12 @@ private val REMOTE_NAVIGATION_JS = """
     (function () {
       if (window.__lordSerialRemote) return;
       window.__lordSerialRemote = true;
+      // WebView's own focus ring (orange) would frame whatever the page has focused, at first the
+      // full-screen player itself; only the ring below is shown.
       var style = document.createElement('style');
       style.textContent = '.lordserial-focus{outline:3px solid #fff!important;outline-offset:3px!important;' +
-        'box-shadow:0 0 0 7px rgba(0,0,0,.45)!important}';
+        'box-shadow:0 0 0 7px rgba(0,0,0,.45)!important}' +
+        ':focus:not(.lordserial-focus),:focus-visible:not(.lordserial-focus){outline:none!important}';
       (document.head || document.documentElement).appendChild(style);
 
       var current = null, lastRect = null, beforeSlider = null, openers = [];
