@@ -4,6 +4,8 @@ import android.graphics.Bitmap
 import coil.size.Size
 import coil.transform.Transformation
 import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -74,6 +76,49 @@ private fun parseSeasons(html: String): List<Season>? {
     }.filter { it.episodes.isNotEmpty() }.sortedBy { it.number }
     return seasons.ifEmpty { null }
 }
+
+/**
+ * Keeps the seasons for the next start, so the screen opens complete before the playlist has been
+ * fetched again (or when it cannot be). The stream links are left out: they expire within minutes.
+ */
+fun saveCatalog(file: File, seasons: List<Season>) {
+    runCatching {
+        val array = JSONArray()
+        for (season in seasons) {
+            val episodes = JSONArray()
+            for (episode in season.episodes) {
+                episodes.put(
+                    JSONObject()
+                        .put("episode", episode.number)
+                        .put("duration", episode.duration)
+                        .put("preview", episode.previewTemplate ?: "")
+                )
+            }
+            array.put(JSONObject().put("season", season.number).put("episodes", episodes))
+        }
+        val part = File(file.path + ".part")
+        part.writeText(array.toString())
+        part.renameTo(file)
+    }
+}
+
+fun readCatalog(file: File): List<Season>? = runCatching {
+    val array = JSONArray(file.readText())
+    (0 until array.length()).map { i ->
+        val season = array.getJSONObject(i)
+        val number = season.getInt("season")
+        val episodes = season.getJSONArray("episodes")
+        Season(number, (0 until episodes.length()).map { j ->
+            val episode = episodes.getJSONObject(j)
+            Episode(
+                number,
+                episode.getInt("episode"),
+                episode.optInt("duration"),
+                episode.optString("preview").takeIf { SPRITE_PLACEHOLDER in it }
+            )
+        })
+    }.filter { it.episodes.isNotEmpty() }.ifEmpty { null }
+}.getOrNull()
 
 /** Index of the bracket closing the one at [start], skipping brackets inside JSON strings. */
 private fun matchingBracket(text: String, start: Int): Int? {

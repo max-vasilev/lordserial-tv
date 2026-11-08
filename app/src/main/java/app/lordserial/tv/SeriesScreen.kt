@@ -51,6 +51,7 @@ import androidx.tv.material3.Text
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import coil.size.Size
+import kotlinx.coroutines.delay
 import java.io.File
 
 internal val BACKGROUND = Color(0xFF090B12)
@@ -111,9 +112,19 @@ fun SeriesScreen(
             resume.duration > 0
         ) " · осталось ${minutes(resume.duration - resumePosition)}" else ""
 
-    var selectedSeason by remember(seasons) { mutableIntStateOf(resume.season) }
+    // The playlist is replaced when a fresh copy arrives; with the same seasons and episode counts
+    // that must not reset where the viewer is on the screen.
+    val shape = seasons.map { it.number to it.episodes.size }
+    var selectedSeason by remember(shape) { mutableIntStateOf(resume.season) }
     val season = seasons.firstOrNull { it.number == selectedSeason } ?: seasons.first()
-    var hero by remember(seasons) { mutableStateOf(resume) }
+    var hero by remember(shape) { mutableStateOf(resume) }
+    // The background follows focus only once it rests, so skimming the row does not load a still
+    // for every card passed. The lines over the button change at once.
+    var backdrop by remember(shape) { mutableStateOf(resume) }
+    LaunchedEffect(hero) {
+        delay(300)
+        backdrop = hero
+    }
 
     // The card a season's row starts on: the episode to resume, else the first one not watched.
     fun entryIndex(of: Season) =
@@ -122,16 +133,22 @@ fun SeriesScreen(
         }.coerceAtLeast(0)
 
     val resumeFocus = remember { FocusRequester() }
-    val tabFocus = remember(seasons) { seasons.associate { it.number to FocusRequester() } }
-    val cardFocus = remember(season) { season.episodes.map { FocusRequester() } }
-    var rowIndex by remember(season) { mutableIntStateOf(entryIndex(season)) }
+    val tabFocus = remember(shape) { seasons.associate { it.number to FocusRequester() } }
+    val cardFocus = remember(shape, season.number) { season.episodes.map { FocusRequester() } }
+    var rowIndex by remember(shape, season.number) { mutableIntStateOf(entryIndex(season)) }
     val rowState = rememberLazyListState()
 
     LaunchedEffect(Unit) { runCatching { resumeFocus.requestFocus() } }
-    LaunchedEffect(season) { rowState.scrollToItem(rowIndex) }
+    LaunchedEffect(shape, season.number) { rowState.scrollToItem(rowIndex) }
+    // Make the stills of the whole season one by one, after the visible cards have started theirs,
+    // so cards scrolled into view later are sharp at once.
+    LaunchedEffect(season) {
+        delay(1_500)
+        for (episode in season.episodes) stills.load(episode)
+    }
 
     Box(modifier = Modifier.fillMaxSize().background(BACKGROUND)) {
-        EpisodeImage(hero, stills, Modifier.fillMaxSize())
+        EpisodeImage(backdrop, stills, Modifier.fillMaxSize())
         Box(
             Modifier.fillMaxSize().background(
                 Brush.horizontalGradient(

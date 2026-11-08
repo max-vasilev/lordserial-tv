@@ -29,6 +29,7 @@ import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import androidx.tv.material3.darkColorScheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
@@ -318,6 +319,7 @@ class MainActivity : ComponentActivity() {
     private var seasons by mutableStateOf(fallbackCatalog(EPISODE_COUNTS))
     private var lastOpened by mutableStateOf<Pair<Int, Int>?>(null)
     private val positions = mutableStateMapOf<String, Int>()
+    private val catalogFile by lazy { File(filesDir, "catalog.json") }
     private val stills by lazy { Stills(File(cacheDir, "stills"), PLAYER_BASE_URL) { tvUserAgent() } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -327,6 +329,7 @@ class MainActivity : ComponentActivity() {
         val season = progress.getInt(KEY_SEASON, 0)
         val episode = progress.getInt(KEY_EPISODE, 0)
         if (season > 0 && episode > 0) lastOpened = season to episode
+        readCatalog(catalogFile)?.let { seasons = it }
         progress.all.forEach { (key, value) ->
             if (key.startsWith(KEY_POSITION_PREFIX) && value is Int) {
                 positions[key.removePrefix(KEY_POSITION_PREFIX)] = value
@@ -338,7 +341,21 @@ class MainActivity : ComponentActivity() {
 
             LaunchedEffect(Unit) {
                 val agent = tvUserAgent()
-                withContext(Dispatchers.IO) { loadCatalog(PLAYER_BASE_URL, agent) }?.let { seasons = it }
+                withContext(Dispatchers.IO) {
+                    loadCatalog(PLAYER_BASE_URL, agent)?.also { saveCatalog(catalogFile, it) }
+                }?.let { seasons = it }
+            }
+
+            // Note the position every 30 seconds as well: when an episode ends, the player goes on to
+            // the next one by itself, and a note taken only on leaving would miss the finished one.
+            LaunchedEffect(playing) {
+                if (playing == null) return@LaunchedEffect
+                while (true) {
+                    delay(30_000)
+                    webView?.evaluateJavascript("(function(){$SNAPSHOT_JS})()") {
+                        saveSnapshot(runCatching { JSONObject(it) }.getOrNull())
+                    }
+                }
             }
 
             BackHandler(enabled = playing != null) {

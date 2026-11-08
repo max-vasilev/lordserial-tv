@@ -6,9 +6,9 @@ The app uses a native Compose for TV interface for season/episode selection. Pla
 
 ## Series screen
 Laid out like the TV apps of streaming services: the focused episode's still fills the background, the title and a Continue button sit at the top, and season tabs and a row of episode cards run along the bottom.
-- Seasons, episodes and durations come from the player's own playlist (its embed page), so new episodes appear without an app update; a built-in list is used only when it cannot be loaded.
-- Stills are real frames: one 720p segment about ten minutes into the episode is fetched once and its first frame is kept as a JPEG in the app cache (letterbox bars cropped). Until it is ready the card shows a frame from the player's 160×90 preview sprites.
-- The app notes the position of the episode the player is on when you leave it (Back or Home): cards show a progress bar or a watched mark, and Continue offers the next episode once one is finished.
+- Seasons, episodes and durations come from the player's own playlist (its embed page), so new episodes appear without an app update. The last copy is kept in the app's files, so the screen opens complete at once and works offline; a built-in list is used only before the first successful load.
+- Stills are real frames: one 720p segment about ten minutes into the episode is fetched once and its first frame is kept as a JPEG in the app cache (letterbox bars cropped). Until it is ready the card shows a frame from the player's 160×90 preview sprites. The rest of the open season's stills are made one by one in the background, and the background still changes only once focus rests on a card for 0.3 s.
+- The app notes the position of the episode the player is on every 30 seconds and when you leave it (Back or Home), so an episode the player moved on from by itself is marked too: cards show a progress bar or a watched mark, and Continue offers the next episode once one is finished.
 - Focusing a season tab switches the row; focus enters the tabs on the current season and the row on the last focused card.
 
 ## Target device
