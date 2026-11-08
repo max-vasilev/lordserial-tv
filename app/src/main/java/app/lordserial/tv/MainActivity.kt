@@ -320,7 +320,7 @@ class MainActivity : ComponentActivity() {
     private var lastOpened by mutableStateOf<Pair<Int, Int>?>(null)
     private val positions = mutableStateMapOf<String, Int>()
     private val catalogFile by lazy { File(filesDir, "catalog.json") }
-    private val stills by lazy { Stills(File(cacheDir, "stills"), PLAYER_BASE_URL) { tvUserAgent() } }
+    private val stills by lazy { Stills(File(cacheDir, "stills"), assets, PLAYER_BASE_URL) { tvUserAgent() } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

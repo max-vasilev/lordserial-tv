@@ -1,5 +1,6 @@
 package app.lordserial.tv
 
+import android.content.res.AssetManager
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.media.MediaMetadataRetriever
@@ -15,14 +16,21 @@ import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Sharp stills for the episode cards. The player's preview sprites are only 160 x 90, so the still
- * is taken from the episode's own stream instead: one 720p segment about ten minutes in (under a
- * megabyte) is fetched and its first frame kept as a JPEG, once per episode.
+ * Stills for the episode cards. Chosen frames are built into the APK (assets/stills, made by
+ * tools/fetch_stills.py), so they show at once. An episode the build has no still for, such as one
+ * added since, gets one from its own stream instead: one 720p segment about ten minutes in (under a
+ * megabyte) is fetched and its first frame kept as a JPEG in the cache, once.
  *
  * The stream links in the playlist expire within minutes, so the playlist is read again for them
  * rather than taken from the copy the screen was built from.
  */
-class Stills(private val dir: File, private val playlistUrl: String, private val userAgent: () -> String) {
+class Stills(
+    private val dir: File,
+    assets: AssetManager,
+    private val playlistUrl: String,
+    private val userAgent: () -> String
+) {
+    private val bundled: Set<String> = runCatching { assets.list("stills")?.toSet() }.getOrNull().orEmpty()
     private val downloads = Semaphore(2)
     private val locks = ConcurrentHashMap<String, Mutex>()
     private val streamsLock = Mutex()
@@ -33,11 +41,15 @@ class Stills(private val dir: File, private val playlistUrl: String, private val
         dir.mkdirs()
     }
 
-    /** The still if it has been made before. */
-    fun cached(episode: Episode): File? = file(episode).takeIf { it.length() > 0 }
+    private fun name(episode: Episode) = "s${episode.season}e${episode.number}.jpg"
 
-    /** The still, made now if needed; null when the stream cannot be read. */
-    suspend fun load(episode: Episode): File? = withContext(Dispatchers.IO) {
+    /** The still as an image model: the built-in one, else one made before; null when there is none. */
+    fun cached(episode: Episode): Any? =
+        if (name(episode) in bundled) "file:///android_asset/stills/${name(episode)}"
+        else file(episode).takeIf { it.length() > 0 }
+
+    /** The still, made now from the stream if needed; null when the stream cannot be read. */
+    suspend fun load(episode: Episode): Any? = withContext(Dispatchers.IO) {
         cached(episode)?.let { return@withContext it }
         locks.getOrPut(episode.key) { Mutex() }.withLock {
             cached(episode) ?: downloads.withPermit {
@@ -46,7 +58,7 @@ class Stills(private val dir: File, private val playlistUrl: String, private val
         }
     }
 
-    private fun file(episode: Episode) = File(dir, "s${episode.season}e${episode.number}.jpg")
+    private fun file(episode: Episode) = File(dir, name(episode))
 
     private suspend fun stream(episode: Episode): String? = streamsLock.withLock {
         if (System.currentTimeMillis() - streamsAt > 60_000) {

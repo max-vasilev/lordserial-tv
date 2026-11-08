@@ -50,9 +50,7 @@ import androidx.tv.material3.LocalContentColor
 import androidx.tv.material3.Text
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
-import coil.size.Size
 import kotlinx.coroutines.delay
-import java.io.File
 
 internal val BACKGROUND = Color(0xFF090B12)
 internal val SURFACE = Color(0xFF1C1F2B)
@@ -140,11 +138,12 @@ fun SeriesScreen(
 
     LaunchedEffect(Unit) { runCatching { resumeFocus.requestFocus() } }
     LaunchedEffect(shape, season.number) { rowState.scrollToItem(rowIndex) }
-    // Make the stills of the whole season one by one, after the visible cards have started theirs,
-    // so cards scrolled into view later are sharp at once.
+    // Episodes the build has no still for get one made ahead, the open season first, one at a time
+    // once the visible cards have started theirs. Only while this screen is open, so it never
+    // competes with playback for the connection. Built-in stills return at once.
     LaunchedEffect(season) {
         delay(1_500)
-        for (episode in season.episodes) stills.load(episode)
+        for (episode in season.episodes + all.filter { it.season != season.number }) stills.load(episode)
     }
 
     Box(modifier = Modifier.fillMaxSize().background(BACKGROUND)) {
@@ -332,16 +331,17 @@ private fun EpisodeCard(
             )
         ) {
             Box(Modifier.fillMaxSize()) {
-                EpisodeImage(episode, stills, Modifier.fillMaxSize())
-                if (episode.still() == null) {
+                // Only for an episode with no still yet; the still covers it once made.
+                if (remember(episode) { stills.cached(episode) == null }) {
                     Text(
                         "${episode.number}",
                         modifier = Modifier.align(Alignment.Center),
                         fontSize = 34.sp,
                         fontWeight = FontWeight.Bold,
-                        color = MUTED
+                        color = MUTED.copy(alpha = 0.5f)
                     )
                 }
+                EpisodeImage(episode, stills, Modifier.fillMaxSize())
                 if (watched) {
                     Box(
                         Modifier
@@ -384,45 +384,20 @@ private fun EpisodeCard(
     }
 }
 
-/** The sprite frame at once, covered by the sharp still when it is ready. */
+/** The episode's still; one made from the stream fades in once ready, never a blurry stand-in. */
 @Composable
 private fun EpisodeImage(episode: Episode, stills: Stills, modifier: Modifier) {
     // Keyed state, so a new episode never shows the previous one's still while its own loads.
-    val sharp = remember(episode) { mutableStateOf(stills.cached(episode)) }
+    val still = remember(episode) { mutableStateOf(stills.cached(episode)) }
+    // Only a still that arrives later fades in; one that is there already just shows.
+    val late = remember(episode) { still.value == null }
     LaunchedEffect(episode) {
-        if (sharp.value == null) sharp.value = stills.load(episode)
+        if (still.value == null) still.value = stills.load(episode)
     }
-    Box(modifier) {
-        StillImage(episode.still(), Modifier.fillMaxSize())
-        sharp.value?.let { SharpImage(it, Modifier.fillMaxSize()) }
-    }
-}
-
-@Composable
-private fun SharpImage(file: File, modifier: Modifier) {
+    val image = still.value ?: return
     val context = LocalContext.current
     AsyncImage(
-        model = remember(file) { ImageRequest.Builder(context).data(file).crossfade(300).build() },
-        contentDescription = null,
-        contentScale = ContentScale.Crop,
-        modifier = modifier
-    )
-}
-
-@Composable
-private fun StillImage(still: Still?, modifier: Modifier) {
-    if (still == null) return
-    val context = LocalContext.current
-    AsyncImage(
-        model = remember(still) {
-            ImageRequest.Builder(context)
-                .data(still.url)
-                // The frame is cut from the full sprite, so it must be decoded at full size.
-                .size(Size.ORIGINAL)
-                .transformations(SpriteFrame(still.frame))
-                .crossfade(250)
-                .build()
-        },
+        model = remember(image) { ImageRequest.Builder(context).data(image).crossfade(late).build() },
         contentDescription = null,
         contentScale = ContentScale.Crop,
         modifier = modifier

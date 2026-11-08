@@ -1,8 +1,5 @@
 package app.lordserial.tv
 
-import android.graphics.Bitmap
-import coil.size.Size
-import coil.transform.Transformation
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -15,8 +12,6 @@ data class Episode(
     val number: Int,
     /** Seconds; 0 when unknown. */
     val duration: Int,
-    /** URL of the player's preview sprites, with SPRITE_PLACEHOLDER for the sprite number. */
-    val previewTemplate: String?,
     /** HLS master playlist; the link expires within minutes. */
     val stream: String? = null
 ) {
@@ -25,16 +20,14 @@ data class Episode(
 
 data class Season(val number: Int, val episodes: List<Episode>)
 
-/** Shown until the playlist has loaded, and when it cannot be loaded: numbers only, no stills. */
+/** Shown until the playlist has loaded for the first time: numbers only, no durations. */
 fun fallbackCatalog(counts: List<Int>): List<Season> = counts.mapIndexed { index, count ->
-    Season(index + 1, (1..count).map { Episode(index + 1, it, 0, null) })
+    Season(index + 1, (1..count).map { Episode(index + 1, it, 0) })
 }
-
-private const val SPRITE_PLACEHOLDER = "\${spriteNum}"
 
 /**
  * Reads the seasons from the player's embed page, which carries the whole playlist: every episode
- * with its duration and the preview sprites the player shows over its progress bar.
+ * with its duration and its stream.
  */
 fun loadCatalog(url: String, userAgent: String): List<Season>? = runCatching {
     val connection = URL(url).openConnection() as HttpURLConnection
@@ -64,12 +57,10 @@ private fun parseSeasons(html: String): List<Season>? {
         Season(number, (0 until episodes.length()).mapNotNull { j ->
             val episode = episodes.getJSONObject(j)
             val episodeNumber = episode.optString("episode").toIntOrNull() ?: return@mapNotNull null
-            val preview = episode.optJSONObject("preview")?.optString("src").orEmpty()
             Episode(
                 number,
                 episodeNumber,
                 episode.optInt("duration"),
-                preview.takeIf { SPRITE_PLACEHOLDER in it },
                 episode.optString("hls").takeIf { it.startsWith("https://") }
             )
         }.sortedBy { it.number })
@@ -87,12 +78,7 @@ fun saveCatalog(file: File, seasons: List<Season>) {
         for (season in seasons) {
             val episodes = JSONArray()
             for (episode in season.episodes) {
-                episodes.put(
-                    JSONObject()
-                        .put("episode", episode.number)
-                        .put("duration", episode.duration)
-                        .put("preview", episode.previewTemplate ?: "")
-                )
+                episodes.put(JSONObject().put("episode", episode.number).put("duration", episode.duration))
             }
             array.put(JSONObject().put("season", season.number).put("episodes", episodes))
         }
@@ -110,12 +96,7 @@ fun readCatalog(file: File): List<Season>? = runCatching {
         val episodes = season.getJSONArray("episodes")
         Season(number, (0 until episodes.length()).map { j ->
             val episode = episodes.getJSONObject(j)
-            Episode(
-                number,
-                episode.getInt("episode"),
-                episode.optInt("duration"),
-                episode.optString("preview").takeIf { SPRITE_PLACEHOLDER in it }
-            )
+            Episode(number, episode.getInt("episode"), episode.optInt("duration"))
         })
     }.filter { it.episodes.isNotEmpty() }.ifEmpty { null }
 }.getOrNull()
@@ -140,36 +121,4 @@ private fun matchingBracket(text: String, start: Int): Int? {
         }
     }
     return null
-}
-
-// A preview sprite is a 10 x 10 grid of 160 x 90 frames, one frame every 5 seconds.
-private const val SPRITE_COLUMNS = 10
-private const val SPRITE_FRAMES = 100
-private const val FRAME_SECONDS = 5
-
-/** A frame of a preview sprite: a blurry still shown until the sharp one (Stills) is ready. */
-data class Still(val url: String, val frame: Int)
-
-/** About ten minutes in (a third in for a short episode): past the cold open, short of the end. */
-fun Episode.still(): Still? {
-    val template = previewTemplate ?: return null
-    val at = if (duration > 0) minOf(600, duration / 3) else 600
-    val index = at / FRAME_SECONDS
-    val sprite = index / SPRITE_FRAMES + 1
-    return Still(template.replace(SPRITE_PLACEHOLDER, sprite.toString()), index % SPRITE_FRAMES)
-}
-
-/** Cuts one frame out of a sprite, without the thin letterbox bars the frames carry. */
-class SpriteFrame(private val frame: Int) : Transformation {
-    override val cacheKey = "sprite-frame-$frame"
-
-    override suspend fun transform(input: Bitmap, size: Size): Bitmap {
-        val width = input.width / SPRITE_COLUMNS
-        val height = width * 9 / 16
-        val bars = height * 6 / 100
-        val x = (frame % SPRITE_COLUMNS) * width
-        val y = (frame / SPRITE_COLUMNS) * height
-        if (x + width > input.width || y + height > input.height) return input
-        return Bitmap.createBitmap(input, x, y + bars, width, height - 2 * bars)
-    }
 }
