@@ -1,5 +1,6 @@
 package app.lordserial.tv
 
+import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -39,6 +40,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Border
@@ -58,7 +60,14 @@ internal val MUTED = Color(0xFFB8BBC7)
 internal val ACCENT = Color(0xFFB52A36)
 
 private const val TITLE = "ОЧЕНЬ СТРАННЫЕ ДЕЛА"
+private const val FACTS = "2016–2025 · фантастика, ужасы, драма"
+// Shown until the wiki on Fandom has been read once.
+private const val DESCRIPTION = "Хокинс, 1983 год. Пропадает мальчик, и его друзья, семья и шеф полиции " +
+    "раскрывают тайну секретной лаборатории, девочки со сверхспособностями и Изнанки."
 private val SIDE = 56.dp
+// The header's text column: about half the screen, as streaming apps keep the synopsis, so lines
+// stay short enough to read from the sofa and the still shows on the right.
+private val TEXT_WIDTH = 520.dp
 private val CARD_SHAPE = RoundedCornerShape(10.dp)
 
 /** Watched to the end credits, give or take. */
@@ -79,8 +88,10 @@ private fun minutes(seconds: Int) = "${(seconds + 59) / 60} мин"
 
 /**
  * The series page, laid out like the TV apps of streaming services: the focused episode's still
- * fills the background, the title and a Continue button sit at the top, and the seasons and a row
- * of episode cards run along the bottom. Focusing a season tab switches the row to it.
+ * fills the background, the title, a short description and a Continue button sit at the top left,
+ * and the seasons and a row of episode cards run along the bottom. Focusing a season tab switches
+ * the row to it. While focus is on the tabs or the cards, the focused episode takes the
+ * description's place, so the header never stacks the series and an episode at once.
  */
 @Composable
 fun SeriesScreen(
@@ -88,6 +99,7 @@ fun SeriesScreen(
     last: Pair<Int, Int>?,
     positions: Map<String, Int>,
     stills: Stills,
+    info: SeriesInfo,
     onOpen: (Episode) -> Unit
 ) {
     val all = remember(seasons) { seasons.flatMap { it.episodes } }
@@ -116,6 +128,8 @@ fun SeriesScreen(
     var selectedSeason by remember(shape) { mutableIntStateOf(resume.season) }
     val season = seasons.firstOrNull { it.number == selectedSeason } ?: seasons.first()
     var hero by remember(shape) { mutableStateOf(resume) }
+    // Focus on the Continue button, rather than on the tabs or the cards.
+    var onTop by remember { mutableStateOf(true) }
     // The background follows focus only once it rests, so skimming the row does not load a still
     // for every card passed. The lines over the button change at once.
     var backdrop by remember(shape) { mutableStateOf(resume) }
@@ -135,7 +149,6 @@ fun SeriesScreen(
     val cardFocus = remember(shape, season.number) { season.episodes.map { FocusRequester() } }
     var rowIndex by remember(shape, season.number) { mutableIntStateOf(entryIndex(season)) }
     val rowState = rememberLazyListState()
-
     LaunchedEffect(Unit) { runCatching { resumeFocus.requestFocus() } }
     LaunchedEffect(shape, season.number) { rowState.scrollToItem(rowIndex) }
     // Episodes the build has no still for get one made ahead, the open season first, one at a time
@@ -152,8 +165,9 @@ fun SeriesScreen(
             Modifier.fillMaxSize().background(
                 Brush.horizontalGradient(
                     0f to BACKGROUND,
-                    0.45f to BACKGROUND.copy(alpha = 0.82f),
-                    1f to BACKGROUND.copy(alpha = 0.3f)
+                    0.3f to BACKGROUND.copy(alpha = 0.85f),
+                    0.6f to BACKGROUND.copy(alpha = 0.35f),
+                    1f to BACKGROUND.copy(alpha = 0.15f)
                 )
             )
         )
@@ -163,29 +177,83 @@ fun SeriesScreen(
             )
         )
 
-        Column(modifier = Modifier.fillMaxSize().padding(top = 40.dp, bottom = 26.dp)) {
+        Column(modifier = Modifier.fillMaxSize().padding(top = 28.dp, bottom = 22.dp)) {
             Column(modifier = Modifier.padding(horizontal = SIDE)) {
-                Text(TITLE, fontSize = 38.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                Text(
-                    "${plural(seasons.size, "сезон", "сезона", "сезонов")} · " +
-                        plural(all.size, "серия", "серии", "серий"),
-                    fontSize = 15.sp,
-                    color = MUTED
-                )
-                Spacer(Modifier.height(24.dp))
-                Text(
-                    "${hero.season} сезон · ${hero.number} серия",
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color.White
-                )
-                Text(episodeDetails(hero, positions[hero.key]), fontSize = 15.sp, color = MUTED)
-                Spacer(Modifier.height(18.dp))
+                Text(TITLE, fontSize = 36.sp, lineHeight = 44.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                Spacer(Modifier.height(4.dp))
+                // One block of fixed height, so the row below never moves: the series while focus is
+                // on the button, the focused episode once it is on the tabs or the cards.
+                Crossfade(
+                    targetState = if (onTop) null else hero,
+                    modifier = Modifier.width(TEXT_WIDTH).height(126.dp),
+                    label = "header"
+                ) { episode ->
+                    if (episode == null) {
+                        Column {
+                            Text(
+                                "$FACTS · ${plural(seasons.size, "сезон", "сезона", "сезонов")} · " +
+                                    plural(all.size, "серия", "серии", "серий"),
+                                fontSize = 14.sp,
+                                lineHeight = 20.sp,
+                                maxLines = 1,
+                                color = MUTED
+                            )
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                info.description ?: DESCRIPTION,
+                                fontSize = 16.sp,
+                                lineHeight = 24.sp,
+                                maxLines = 4,
+                                overflow = TextOverflow.Ellipsis,
+                                color = Color.White.copy(alpha = 0.8f)
+                            )
+                        }
+                    } else {
+                        val about = info.episodes[episode.key]
+                        Column {
+                            Text(
+                                (listOf("${episode.season} сезон", "${episode.number} серия") +
+                                    episodeDetails(episode, positions[episode.key]))
+                                    .filter { it.isNotEmpty() }.joinToString(" · "),
+                                fontSize = 14.sp,
+                                lineHeight = 20.sp,
+                                color = MUTED
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                about?.title ?: "${episode.number} серия",
+                                fontSize = 24.sp,
+                                lineHeight = 30.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                color = Color.White
+                            )
+                            about?.synopsis?.let {
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    it,
+                                    fontSize = 15.sp,
+                                    lineHeight = 22.sp,
+                                    maxLines = 3,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = Color.White.copy(alpha = 0.8f)
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
                 Button(
                     onClick = { onOpen(resume) },
                     modifier = Modifier
                         .focusRequester(resumeFocus)
-                        .onFocusChanged { if (it.isFocused) hero = resume },
+                        .onFocusChanged {
+                            if (it.isFocused) {
+                                hero = resume
+                                onTop = true
+                            }
+                        },
                     colors = ButtonDefaults.colors(
                         containerColor = SURFACE,
                         contentColor = Color.White,
@@ -226,6 +294,7 @@ fun SeriesScreen(
                                 if (it.isFocused) {
                                     selectedSeason = tab.number
                                     hero = tab.episodes[entryIndex(tab)]
+                                    onTop = false
                                 }
                             },
                         onClick = { selectedSeason = tab.number }
@@ -249,12 +318,14 @@ fun SeriesScreen(
                         episode = episode,
                         position = positions[episode.key],
                         stills = stills,
+                        title = info.episodes[episode.key]?.title,
                         modifier = Modifier
                             .focusRequester(cardFocus[season.episodes.indexOf(episode)])
                             .onFocusChanged {
                                 if (it.isFocused) {
                                     hero = episode
                                     rowIndex = season.episodes.indexOf(episode)
+                                    onTop = false
                                 }
                             },
                         onClick = { onOpen(episode) }
@@ -311,6 +382,7 @@ private fun EpisodeCard(
     episode: Episode,
     position: Int?,
     stills: Stills,
+    title: String?,
     modifier: Modifier,
     onClick: () -> Unit
 ) {
@@ -342,18 +414,7 @@ private fun EpisodeCard(
                     )
                 }
                 EpisodeImage(episode, stills, Modifier.fillMaxSize())
-                if (watched) {
-                    Box(
-                        Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(8.dp)
-                            .size(24.dp)
-                            .background(Color.White, CircleShape),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("✓", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = BACKGROUND)
-                    }
-                } else if (position != null && position > 60 && episode.duration > 0) {
+                if (!watched && position != null && position > 60 && episode.duration > 0) {
                     Box(
                         Modifier
                             .align(Alignment.BottomStart)
@@ -373,9 +434,11 @@ private fun EpisodeCard(
         }
         Spacer(Modifier.height(10.dp))
         Text(
-            "${episode.number} серия",
+            if (title != null) "${episode.number}. $title" else "${episode.number} серия",
             fontSize = 15.sp,
             fontWeight = if (focused) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
             color = if (focused) Color.White else MUTED
         )
         if (episode.duration > 0) {

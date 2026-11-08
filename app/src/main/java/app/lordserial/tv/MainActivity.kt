@@ -320,6 +320,8 @@ class MainActivity : ComponentActivity() {
     private var lastOpened by mutableStateOf<Pair<Int, Int>?>(null)
     private val positions = mutableStateMapOf<String, Int>()
     private val catalogFile by lazy { File(filesDir, "catalog.json") }
+    private val infoFile by lazy { File(filesDir, "fandom.json") }
+    private var info by mutableStateOf(SeriesInfo.EMPTY)
     private val stills by lazy { Stills(File(cacheDir, "stills"), assets, PLAYER_BASE_URL) { tvUserAgent() } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -330,6 +332,8 @@ class MainActivity : ComponentActivity() {
         val episode = progress.getInt(KEY_EPISODE, 0)
         if (season > 0 && episode > 0) lastOpened = season to episode
         readCatalog(catalogFile)?.let { seasons = it }
+        info = readSeriesInfo(infoFile)
+        File(filesDir, "titles.json").delete() // Titles from Wikipedia, before the wiki on Fandom
         progress.all.forEach { (key, value) ->
             if (key.startsWith(KEY_POSITION_PREFIX) && value is Int) {
                 positions[key.removePrefix(KEY_POSITION_PREFIX)] = value
@@ -344,6 +348,9 @@ class MainActivity : ComponentActivity() {
                 withContext(Dispatchers.IO) {
                     loadCatalog(PLAYER_BASE_URL, agent)?.also { saveCatalog(catalogFile, it) }
                 }?.let { seasons = it }
+                withContext(Dispatchers.IO) {
+                    loadSeriesInfo(seasons.map { it.number })?.also { saveSeriesInfo(infoFile, it) }
+                }?.let { info = it }
             }
 
             // Note the position every 30 seconds as well: when an episode ends, the player goes on to
@@ -429,6 +436,7 @@ class MainActivity : ComponentActivity() {
                             last = lastOpened,
                             positions = positions,
                             stills = stills,
+                            info = info,
                             onOpen = {
                                 rememberOpened(it.season, it.number)
                                 playing = it
