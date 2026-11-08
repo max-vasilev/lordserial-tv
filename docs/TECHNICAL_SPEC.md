@@ -10,7 +10,7 @@ Xiaomi Mi TV 4A, model identifier MiTV-MOOQ1, Android TV 11.
 - Launch opens directly into the native player interface.
 - Native Compose UI owns continue watching, season selection and episode selection. During playback the player's own controls are used, unchanged.
 - All interaction is designed for a TV remote: D-pad, OK and Back. No mouse cursor or touch-only interactions.
-- The player keeps the playback position per episode itself; the app retains the last selected episode.
+- The player keeps the playback position per episode itself. The app also notes it when leaving the player, for the progress bars, watched marks and the Continue button, and retains the last selected episode.
 - Persist selected season/episode and watched progress locally.
 - Modern dark TV-first design with large readable typography, clear focus states and generous spacing.
 - No visible website page, browser chrome, website navigation or cursor. The player's own controls are shown, with a visible focus ring.

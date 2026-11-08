@@ -4,6 +4,13 @@ Personal Android TV player for «Очень странные дела».
 
 The app uses a native Compose for TV interface for season/episode selection. Playback shows Player 1 exactly as the site does, full screen, operated with the remote instead of a cursor. The LordSerial website page itself is not displayed.
 
+## Series screen
+Laid out like the TV apps of streaming services: the focused episode's still fills the background, the title and a Continue button sit at the top, and season tabs and a row of episode cards run along the bottom.
+- Seasons, episodes and durations come from the player's own playlist (its embed page), so new episodes appear without an app update; a built-in list is used only when it cannot be loaded.
+- Stills are real frames: one 720p segment about ten minutes into the episode is fetched once and its first frame is kept as a JPEG in the app cache (letterbox bars cropped). Until it is ready the card shows a frame from the player's 160×90 preview sprites.
+- The app notes the position of the episode the player is on when you leave it (Back or Home): cards show a progress bar or a watched mark, and Continue offers the next episode once one is finished.
+- Focusing a season tab switches the row; focus enters the tabs on the current season and the row on the last focused card.
+
 ## Target device
 - Xiaomi Mi TV 4A (MiTV-MOOQ1)
 - Android TV 11

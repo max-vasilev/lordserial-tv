@@ -16,49 +16,39 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color as ComposeColor
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.tv.material3.Button
-import androidx.tv.material3.ButtonColors
-import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import androidx.tv.material3.darkColorScheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.io.File
 
 private const val PLAYER_HOST = "api.namy.ws"
 private const val MOVIE_ID = 354
 private const val PLAYER_BASE_URL = "https://$PLAYER_HOST/embed/movie/$MOVIE_ID"
 private const val LAST_EPISODE_KEY = "vp$MOVIE_ID"
-private val EPISODE_COUNTS = listOf(8, 9, 8, 9, 8)
-private val BACKGROUND = ComposeColor(0xFF090B12)
-private val SURFACE = ComposeColor(0xFF1C1F2B)
-private val MUTED = ComposeColor(0xFFB8BBC7)
-private val ACCENT = ComposeColor(0xFFB52A36)
+// Until the player's playlist has loaded, or when it cannot be.
+private val EPISODE_COUNTS = listOf(8, 9, 8, 9, 9)
 
 private const val PREFS = "progress"
 private const val KEY_SEASON = "last_season"
 private const val KEY_EPISODE = "last_episode"
+private const val KEY_POSITION_PREFIX = "position_"
+
+// Where the player is: the episode it has on (localStorage, which it updates itself when the
+// episode changes inside it) and the position of the main video. Ads play in frames of their own.
+private const val SNAPSHOT_JS = "var r={};try{r.last=localStorage.getItem('$LAST_EPISODE_KEY')||''}catch(e){}" +
+    "var v=document.querySelector('video');if(v&&isFinite(v.duration)){r.t=v.currentTime;r.d=v.duration}return r;"
 
 // The site's player has a TV layout but expects the browser to move focus between its buttons,
 // which Android WebView does not do. This script adds only that: the arrows move a focus ring to
@@ -325,50 +315,48 @@ class MainActivity : ComponentActivity() {
     private var webView: WebView? = null
     private var loadError by mutableStateOf<String?>(null)
     private val progress by lazy { getSharedPreferences(PREFS, MODE_PRIVATE) }
+    private var seasons by mutableStateOf(fallbackCatalog(EPISODE_COUNTS))
+    private var lastOpened by mutableStateOf<Pair<Int, Int>?>(null)
+    private val positions = mutableStateMapOf<String, Int>()
+    private val stills by lazy { Stills(File(cacheDir, "stills"), PLAYER_BASE_URL) { tvUserAgent() } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         applyImmersiveMode()
+        val season = progress.getInt(KEY_SEASON, 0)
+        val episode = progress.getInt(KEY_EPISODE, 0)
+        if (season > 0 && episode > 0) lastOpened = season to episode
+        progress.all.forEach { (key, value) ->
+            if (key.startsWith(KEY_POSITION_PREFIX) && value is Int) {
+                positions[key.removePrefix(KEY_POSITION_PREFIX)] = value
+            }
+        }
 
         setContent {
-            var selectedSeason by remember { mutableIntStateOf(progress.getInt(KEY_SEASON, 1)) }
-            var selectedEpisode by remember { mutableIntStateOf(0) }
-            var lastWatched by remember { mutableStateOf(readLastWatched()) }
-            val episodeUrl = if (selectedEpisode == 0) null else
-                "$PLAYER_BASE_URL?episode=$selectedEpisode&season=$selectedSeason"
+            var playing by remember { mutableStateOf<Episode?>(null) }
 
-            fun openEpisode(season: Int, episode: Int) {
-                selectedSeason = season
-                selectedEpisode = episode
-                lastWatched = season to episode
-                progress.edit()
-                    .putInt(KEY_SEASON, season)
-                    .putInt(KEY_EPISODE, episode)
-                    .apply()
+            LaunchedEffect(Unit) {
+                val agent = tvUserAgent()
+                withContext(Dispatchers.IO) { loadCatalog(PLAYER_BASE_URL, agent) }?.let { seasons = it }
             }
 
-            BackHandler(enabled = selectedEpisode != 0) {
+            BackHandler(enabled = playing != null) {
                 val player = webView
-                when {
-                    player == null -> selectedEpisode = 0
-                    // An open menu in the player closes first. Otherwise read the episode the player
-                    // is on, which may have changed inside the player.
-                    else -> player.evaluateJavascript(
-                        "(function(){if(window.__lordSerialBack&&window.__lordSerialBack())return 'list';" +
-                            "try{return localStorage.getItem('$LAST_EPISODE_KEY')||''}catch(e){return ''}})()"
-                    ) { result ->
-                        val value = result?.trim('"').orEmpty()
-                        if (value != "list") {
-                            val parts = value.split(":").mapNotNull { it.toIntOrNull() }
-                            if (parts.size == 2 && parts[0] in 1..EPISODE_COUNTS.size &&
-                                parts[1] in 1..EPISODE_COUNTS[parts[0] - 1]
-                            ) {
-                                openEpisode(parts[0], parts[1])
-                            }
-                            closePlayer()
-                            selectedEpisode = 0
-                        }
+                if (player == null) {
+                    playing = null
+                    return@BackHandler
+                }
+                // An open menu in the player closes first. Otherwise note where the player is and
+                // go back to the episodes.
+                player.evaluateJavascript(
+                    "(function(){if(window.__lordSerialBack&&window.__lordSerialBack())return {menu:true};$SNAPSHOT_JS})()"
+                ) { result ->
+                    val snapshot = runCatching { JSONObject(result) }.getOrNull()
+                    if (snapshot?.optBoolean("menu") != true) {
+                        saveSnapshot(snapshot)
+                        closePlayer()
+                        playing = null
                     }
                 }
             }
@@ -385,7 +373,9 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize().background(BACKGROUND),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (episodeUrl != null) {
+                    val episode = playing
+                    if (episode != null) {
+                        val episodeUrl = "$PLAYER_BASE_URL?episode=${episode.number}&season=${episode.season}"
                         AndroidView(
                             modifier = Modifier.fillMaxSize(),
                             factory = {
@@ -398,7 +388,7 @@ class MainActivity : ComponentActivity() {
                                     player.loadDataWithBaseURL(
                                         "https://$PLAYER_HOST/",
                                         "<script>try{localStorage.setItem('$LAST_EPISODE_KEY'," +
-                                            "'$selectedSeason:$selectedEpisode')}catch(e){}" +
+                                            "'${episode.season}:${episode.number}')}catch(e){}" +
                                             "location.replace('$episodeUrl')</script>",
                                         "text/html",
                                         "UTF-8",
@@ -417,12 +407,14 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     } else {
-                        SeriesHome(
-                            selectedSeason = selectedSeason,
-                            lastWatched = lastWatched,
-                            onSeasonSelected = { selectedSeason = it },
-                            onEpisodeSelected = { season, episode ->
-                                openEpisode(season, episode)
+                        SeriesScreen(
+                            seasons = seasons,
+                            last = lastOpened,
+                            positions = positions,
+                            stills = stills,
+                            onOpen = {
+                                rememberOpened(it.season, it.number)
+                                playing = it
                             }
                         )
                     }
@@ -431,117 +423,25 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun readLastWatched(): Pair<Int, Int>? {
-        val season = progress.getInt(KEY_SEASON, 0)
-        val episode = progress.getInt(KEY_EPISODE, 0)
-        return if (season in 1..EPISODE_COUNTS.size && episode in 1..EPISODE_COUNTS[season - 1])
-            season to episode else null
+    private fun tvUserAgent() = WebSettings.getDefaultUserAgent(this).replace(" Mobile", "")
+
+    private fun rememberOpened(season: Int, episode: Int) {
+        lastOpened = season to episode
+        progress.edit().putInt(KEY_SEASON, season).putInt(KEY_EPISODE, episode).apply()
     }
 
-    @Composable
-    private fun chipColors(selected: Boolean = false): ButtonColors = ButtonDefaults.colors(
-        containerColor = if (selected) ACCENT else SURFACE,
-        contentColor = ComposeColor.White,
-        focusedContainerColor = ComposeColor.White,
-        focusedContentColor = BACKGROUND,
-        pressedContainerColor = MUTED,
-        pressedContentColor = BACKGROUND
-    )
-
-    @Composable
-    private fun SeriesHome(
-        selectedSeason: Int,
-        lastWatched: Pair<Int, Int>?,
-        onSeasonSelected: (Int) -> Unit,
-        onEpisodeSelected: (Int, Int) -> Unit
-    ) {
-        val continueFocus = remember { FocusRequester() }
-        val firstSeasonFocus = remember { FocusRequester() }
-        LaunchedEffect(lastWatched) {
-            if (lastWatched != null) {
-                runCatching { continueFocus.requestFocus() }
-            } else {
-                runCatching { firstSeasonFocus.requestFocus() }
-            }
-        }
-
-        Column(
-            modifier = Modifier.fillMaxSize().padding(horizontal = 64.dp, vertical = 38.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp)
-        ) {
-            Text(
-                text = "ОЧЕНЬ СТРАННЫЕ ДЕЛА",
-                fontSize = 34.sp,
-                fontWeight = FontWeight.Bold,
-                color = ComposeColor.White
-            )
-            if (lastWatched != null) {
-                val (season, episode) = lastWatched
-                Button(
-                    onClick = { onEpisodeSelected(season, episode) },
-                    modifier = Modifier.focusRequester(continueFocus),
-                    colors = chipColors()
-                ) {
-                    Text(
-                        text = "▶  Продолжить · Сезон $season, серия $episode",
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            } else {
-                Text("Выбери сезон и серию", fontSize = 18.sp, color = MUTED)
-            }
-
-            Spacer(modifier = Modifier.height(4.dp))
-            Text("СЕЗОНЫ", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = ACCENT)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                for (season in 1..EPISODE_COUNTS.size) {
-                    Button(
-                        onClick = { onSeasonSelected(season) },
-                        modifier = Modifier.width(112.dp).then(
-                            if (season == 1) Modifier.focusRequester(firstSeasonFocus) else Modifier
-                        ),
-                        colors = chipColors(selected = season == selectedSeason)
-                    ) {
-                        Text(
-                            "Сезон $season",
-                            fontSize = 15.sp,
-                            fontWeight = if (season == selectedSeason) FontWeight.Bold else FontWeight.Normal
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                "СЕРИИ · СЕЗОН $selectedSeason",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                color = ACCENT
-            )
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(4),
-                modifier = Modifier.fillMaxSize(),
-                horizontalArrangement = Arrangement.spacedBy(14.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                items((1..EPISODE_COUNTS[selectedSeason - 1]).toList()) { episode ->
-                    Button(
-                        onClick = { onEpisodeSelected(selectedSeason, episode) },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = chipColors()
-                    ) {
-                        Text(
-                            "Серия $episode",
-                            fontSize = 17.sp
-                        )
-                    }
-                }
-            }
-        }
+    /** Stores the episode the player is on and, for a full episode, how far into it. */
+    private fun saveSnapshot(snapshot: JSONObject?) {
+        val parts = snapshot?.optString("last").orEmpty().split(":").mapNotNull { it.toIntOrNull() }
+        if (parts.size != 2) return
+        val (season, episode) = parts
+        rememberOpened(season, episode)
+        val duration = snapshot?.optDouble("d") ?: Double.NaN
+        val position = snapshot?.optDouble("t") ?: Double.NaN
+        if (duration.isNaN() || position.isNaN() || duration < 300) return
+        val key = "$season:$episode"
+        positions[key] = position.toInt()
+        progress.edit().putInt(KEY_POSITION_PREFIX + key, position.toInt()).apply()
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -562,7 +462,7 @@ class MainActivity : ComponentActivity() {
             // The player picks its layout from the user agent: with "Mobile" in it, it shows the
             // touch layout, whose controls only appear on a tap. Without it, this TV's model name
             // ("MiTV") selects the player's own TV layout, the one the site shows on a TV.
-            userAgentString = WebSettings.getDefaultUserAgent(context).replace(" Mobile", "")
+            userAgentString = tvUserAgent()
         }
         val cookieManager = CookieManager.getInstance()
         cookieManager.setAcceptCookie(true)
@@ -632,6 +532,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onPause() {
+        // Home leaves the app without a Back press, so note the position here too.
+        webView?.evaluateJavascript("(function(){$SNAPSHOT_JS})()") { saveSnapshot(runCatching { JSONObject(it) }.getOrNull()) }
         webView?.onPause()
         super.onPause()
     }

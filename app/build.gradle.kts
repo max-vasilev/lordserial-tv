@@ -42,6 +42,7 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.tv:tv-material:1.0.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.4")
+    implementation("io.coil-kt:coil-compose:2.7.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
