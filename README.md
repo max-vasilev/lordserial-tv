@@ -14,9 +14,9 @@ The app uses a native Compose for TV interface for season/episode selection. Pla
 - Existing system VPN/network settings are used unchanged.
 - Playback runs in Android WebView because the provider's direct media stream and player-control protocol have not yet been verified for Media3.
 - The Player 1 embed page is loaded directly and left unchanged. The WebView user agent drops "Mobile", so the player picks its own TV layout instead of the touch layout.
-- Remote control: the arrows move a focus ring between the player's own controls, OK presses the focused one, and the first press while the controls are hidden shows them. On the progress bar Left/Right seek 10 seconds and OK plays or pauses. Back closes an open season/episode/voice list first, then returns to the episode screen.
+- Remote control: the arrows move a focus ring between the player's own controls (including the options inside its settings menus), OK presses the focused one, and the first press while the controls are hidden shows them. On the progress bar Left/Right seek 10 seconds and OK plays or pauses. Back steps out of an open settings submenu, then closes an open menu or season/episode/voice list, then returns to the episode screen.
 - The player keeps its own playback position per episode; the app remembers the last opened episode for Continue Watching.
-- Embedded fullscreen requests are handled by the app.
+- The player's own fullscreen request is declined: the app is already full screen, and WebView would otherwise take the first Back press to leave it.
 
 ## Build
 Requires JDK 17 and Android SDK Platform 36.

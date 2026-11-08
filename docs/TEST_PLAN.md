@@ -10,8 +10,9 @@
 ## Playback
 - Verify Player 1 playback on Xiaomi Mi TV 4A / Android TV 11 with the existing system VPN.
 - Verify the player looks as on the site (TV layout), with a visible focus ring.
-- With the remote only: show the controls, play/pause, next episode, open and pick from the season/episode/voice lists, volume, settings, fullscreen, seek on the progress bar.
-- Back closes an open list first, then returns to the episode screen.
+- With the remote only: show the controls, play/pause, next episode, open and pick from the season/episode/voice lists, volume, seek on the progress bar.
+- Settings: change the quality during playback (the SD/HD/FHD badge follows), speed, subtitles and scale.
+- Back steps out of a settings submenu, then closes the open menu or list, then returns to the episode screen.
 - Verify no website page, browser chrome or mouse cursor is shown.
 - Verify Player 2 and Player 3 are not exposed in the app.
 

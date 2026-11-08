@@ -5,7 +5,6 @@ import android.graphics.Color
 import android.os.Bundle
 import android.view.View
 import android.view.WindowManager
-import android.widget.FrameLayout
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -64,8 +63,8 @@ private const val KEY_EPISODE = "last_episode"
 // The site's player has a TV layout but expects the browser to move focus between its buttons,
 // which Android WebView does not do. This script adds only that: the arrows move a focus ring to
 // the nearest visible control, OK clicks it, and the first press while the controls are hidden
-// just shows them. On the progress bar Left/Right seek and OK plays or pauses. Nothing else on
-// the page is changed.
+// just shows them. On the progress bar Left/Right seek and OK plays or pauses. Back steps out of
+// the player's menus. Nothing else on the page is changed.
 private val REMOTE_NAVIGATION_JS = """
     (function () {
       if (window.__lordSerialRemote) return;
@@ -75,7 +74,7 @@ private val REMOTE_NAVIGATION_JS = """
         'box-shadow:0 0 0 7px rgba(0,0,0,.45)!important}';
       (document.head || document.documentElement).appendChild(style);
 
-      var current = null, lastRect = null, beforeSlider = null;
+      var current = null, lastRect = null, beforeSlider = null, openers = [];
       var SEMANTIC = 'button,a[href],[role="button"],[role="menuitem"],[role="option"],input:not([type="hidden"]),select';
       // The progress bar itself ignores pointer events and its parts inherit the pointer cursor,
       // so it is matched by its class name instead.
@@ -96,9 +95,12 @@ private val REMOTE_NAVIGATION_JS = """
         return !!top && (top === el || el.contains(top));
       }
 
+      // A pointer cursor is inherited, so only the element where it starts counts, plus list
+      // items, which are the options inside a clickable menu row (the settings submenus).
       function clickable(el) {
         if (el.matches(SEMANTIC)) return true;
         if (getComputedStyle(el).cursor !== 'pointer') return false;
+        if (el.tagName === 'LI') return true;
         var p = el.parentElement;
         return !p || getComputedStyle(p).cursor !== 'pointer';
       }
@@ -117,8 +119,9 @@ private val REMOTE_NAVIGATION_JS = """
           if (r.width * r.height > area * 0.4) continue;
           if (shown(el, slider)) found.push(el);
         }
+        // A row that holds other controls (an open submenu) is not a target itself; its options are.
         return found.filter(function (el) {
-          return !found.some(function (other) { return other !== el && other.contains(el); });
+          return !found.some(function (other) { return other !== el && el.contains(other); });
         });
       }
 
@@ -204,19 +207,61 @@ private val REMOTE_NAVIGATION_JS = """
         })();
       }
 
+      // Click the way a mouse would: on the element under the centre of the focused control. The
+      // focused element can be a wrapper whose handler sits on a child (the settings menu rows).
+      function press(el) {
+        var r = el.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
+        var target = document.elementFromPoint(x, y);
+        if (!target || !el.contains(target)) target = el;
+        ['mousedown', 'mouseup', 'click'].forEach(function (type) {
+          target.dispatchEvent(new MouseEvent(type, {
+            bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0
+          }));
+        });
+      }
+
+      // Open, even while the player has faded its controls out (that fade is only opacity): laid
+      // out, not display:none or visibility:hidden, and not inside the player's "hidden_" class,
+      // which is how it closes its menus.
+      function present(el) {
+        if (!el || !el.isConnected) return false;
+        var r = el.getBoundingClientRect();
+        if (r.width < 1 || r.height < 1) return false;
+        for (var n = el; n && n.nodeType === 1; n = n.parentElement) {
+          var cs = getComputedStyle(n);
+          if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+          if (/(^|\s)hidden_/.test(String(n.className))) return false;
+        }
+        return true;
+      }
+
       function togglePlay() {
         var v = document.querySelector('video');
         if (v) { if (v.paused) v.play(); else v.pause(); }
       }
 
-      // Called by the app on Back: closes an open season, episode or voice list first.
+      // Called by the app on Back: steps out of an open settings submenu, then closes whatever the
+      // last OK opened (a season/episode/voice list, the settings menu). False when nothing is open.
       window.__lordSerialBack = function () {
-        var open = document.querySelector('[class*="opened_"]');
-        if (!open || !shown(open, true)) return false;
-        var head = open.querySelector('[class*="head_"]') || open;
-        head.click();
+        var subs = document.querySelectorAll('[class*="submenu_"]'), target = null;
+        for (var i = 0; i < subs.length && !target; i++) {
+          if (present(subs[i]) && present(subs[i].firstElementChild)) target = subs[i].firstElementChild;
+        }
+        if (!target) {
+          // Drop what has closed since (a submenu closed from its header); the menu under it may
+          // still be open.
+          while (openers.length) {
+            var top = openers[openers.length - 1];
+            if (present(top.el) && top.opened.some(present)) break;
+            openers.pop();
+          }
+          if (!openers.length) return false;
+          target = openers.pop().el;
+        }
+        wake();
+        press(target);
         whenSettled(function (list) {
-          setCurrent(list.indexOf(head) >= 0 ? head : (list.length ? nearest(list, lastRect) : null));
+          setCurrent(list.indexOf(target) >= 0 ? target : (list.length ? nearest(list, lastRect) : null));
         });
         return true;
       };
@@ -254,8 +299,10 @@ private val REMOTE_NAVIGATION_JS = """
         }
         if (ok) {
           var clicked = current;
-          clicked.click();
+          press(clicked);
           whenSettled(function (again) {
+            var opened = again.filter(function (el) { return list.indexOf(el) < 0; });
+            if (opened.length) openers.push({ el: clicked, opened: opened });
             if (again.indexOf(clicked) >= 0) setCurrent(clicked);
             else if (again.length) setCurrent(nearest(again, lastRect));
           });
@@ -274,9 +321,6 @@ private val REMOTE_NAVIGATION_JS = """
 class MainActivity : ComponentActivity() {
     private var webView: WebView? = null
     private var loadError by mutableStateOf<String?>(null)
-    private var playerContainer: FrameLayout? = null
-    private var fullscreenView: View? = null
-    private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
     private val progress by lazy { getSharedPreferences(PREFS, MODE_PRIVATE) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -304,10 +348,9 @@ class MainActivity : ComponentActivity() {
             BackHandler(enabled = selectedEpisode != 0) {
                 val player = webView
                 when {
-                    fullscreenView != null -> hideCustomView()
                     player == null -> selectedEpisode = 0
-                    // An open season, episode or voice list in the player closes first. Otherwise
-                    // read the episode the player is on, which may have changed inside the player.
+                    // An open menu in the player closes first. Otherwise read the episode the player
+                    // is on, which may have changed inside the player.
                     else -> player.evaluateJavascript(
                         "(function(){if(window.__lordSerialBack&&window.__lordSerialBack())return 'list';" +
                             "try{return localStorage.getItem('$LAST_EPISODE_KEY')||''}catch(e){return ''}})()"
@@ -342,19 +385,9 @@ class MainActivity : ComponentActivity() {
                     if (episodeUrl != null) {
                         AndroidView(
                             modifier = Modifier.fillMaxSize(),
-                            factory = { context ->
-                                FrameLayout(context).apply {
-                                    setBackgroundColor(Color.BLACK)
-                                    playerContainer = this
-                                    val player = createPlayerWebView()
+                            factory = {
+                                createPlayerWebView().also { player ->
                                     webView = player
-                                    addView(
-                                        player,
-                                        FrameLayout.LayoutParams(
-                                            FrameLayout.LayoutParams.MATCH_PARENT,
-                                            FrameLayout.LayoutParams.MATCH_PARENT
-                                        )
-                                    )
                                     loadError = null
                                     // The player reopens the episode it saved last (localStorage
                                     // "vp<id>" = "season:episode") and ignores the one in the URL,
@@ -371,10 +404,7 @@ class MainActivity : ComponentActivity() {
                                     player.requestFocus()
                                 }
                             },
-                            onRelease = {
-                                closePlayer()
-                                playerContainer = null
-                            }
+                            onRelease = { closePlayer() }
                         )
                         loadError?.let { error ->
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -562,45 +592,15 @@ class MainActivity : ComponentActivity() {
             }
         }
         webChromeClient = object : WebChromeClient() {
+            // The app is already full screen. The player asks for fullscreen when playback starts,
+            // and WebView would then take the first Back press to leave it, so it is declined.
             override fun onShowCustomView(view: View, callback: CustomViewCallback) {
-                if (fullscreenView != null) {
-                    callback.onCustomViewHidden()
-                    return
-                }
-                fullscreenView = view
-                fullscreenCallback = callback
-                view.setBackgroundColor(Color.BLACK)
-                playerContainer?.addView(
-                    view,
-                    FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        FrameLayout.LayoutParams.MATCH_PARENT
-                    )
-                )
-                view.bringToFront()
-                view.requestFocus()
-                applyImmersiveMode()
-            }
-
-            override fun onHideCustomView() {
-                hideCustomView()
+                callback.onCustomViewHidden()
             }
         }
-    }
-
-    private fun hideCustomView() {
-        fullscreenView?.let { view ->
-            playerContainer?.removeView(view)
-        }
-        fullscreenView = null
-        fullscreenCallback?.onCustomViewHidden()
-        fullscreenCallback = null
-        webView?.requestFocus()
-        applyImmersiveMode()
     }
 
     private fun closePlayer() {
-        hideCustomView()
         webView?.apply {
             stopLoading()
             onPause()
@@ -634,7 +634,6 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        hideCustomView()
         webView?.apply {
             stopLoading()
             destroy()

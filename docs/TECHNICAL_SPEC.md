@@ -36,7 +36,7 @@ Xiaomi Mi TV 4A, model identifier MiTV-MOOQ1, Android TV 11.
 2. All navigation is usable with D-pad/OK/Back; focus is always visible and predictable.
 3. User can choose all available seasons and episodes from native UI.
 4. Selecting an episode starts playback through Player 1 without showing the website page.
-5. Every Player 1 control (play/pause, next episode, season/episode/voice lists, volume, settings, fullscreen, progress bar) is reachable and usable with D-pad/OK/Back; embedded fullscreen requests are handled by the app.
+5. Every Player 1 control (play/pause, next episode, season/episode/voice lists, volume, settings with quality/speed/subtitles/scale, progress bar) is reachable and usable with D-pad/OK/Back. The app is always full screen; the player's own fullscreen request is declined.
 6. Progress per episode is kept by the player itself and survives reopening the episode.
 7. Continue Watching opens the last episode; the player resumes it at its saved position.
 8. Back returns from playback to the native episode/season interface, never to a website page.
